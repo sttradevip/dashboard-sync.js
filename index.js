@@ -10,6 +10,11 @@ const API_KEY = process.env.MASSIVE_API_KEY;
 const CHAT_ID = process.env.SIGNALS_CHAT_ID || '-1002840761137';
 const THREAD_ID = Number(process.env.SIGNALS_THREAD_ID || 12385);
 
+const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
+  .split(',')
+  .map(x => x.trim())
+  .filter(Boolean);
+
 const SYMBOLS = String(
   process.env.SIGNAL_SYMBOLS ||
   'TSLA,NVDA,AMZN,SPY,QQQ,META,AAPL,AMD,COIN,PLTR,NFLX'
@@ -20,6 +25,9 @@ const SYMBOLS = String(
 
 const activeTrades = new Map();
 const sentToday = new Set();
+const blockedSymbols = new Set();
+
+let botPaused = false;
 
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;
 const UPDATE_INTERVAL_MS = 30 * 1000;
@@ -42,6 +50,23 @@ const NEAR_STOP_DISTANCE = 0.05;
 // =====================
 // Helpers
 // =====================
+
+function isAdmin(msg) {
+  const fromId = String(msg.from?.id || '');
+  const chatId = String(msg.chat?.id || '');
+
+  return ADMIN_IDS.includes(fromId) || ADMIN_IDS.includes(chatId);
+}
+
+function sendToSameTopic(msg, text) {
+  return bot.sendMessage(
+    msg.chat.id,
+    text,
+    {
+      message_thread_id: msg.message_thread_id
+    }
+  );
+}
 
 function fmt(n) {
   if (n === undefined || n === null || isNaN(Number(n))) {
@@ -132,7 +157,6 @@ function getAsk(item) {
 function getLastTradePrice(item) {
   return Number(item?.last_trade?.price || 0);
 }
-
 function getMidPrice(item) {
   const bid = getBid(item);
   const ask = getAsk(item);
@@ -167,13 +191,19 @@ function daysToExpiration(dateStr) {
   const now = new Date();
   const exp = new Date(dateStr + 'T23:59:59Z');
 
-  return Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  return Math.ceil(
+    (exp.getTime() - now.getTime()) /
+    (1000 * 60 * 60 * 24)
+  );
 }
 
 function gammaText(gamma) {
   const g = Number(gamma);
 
-  if (gamma === undefined || gamma === null || isNaN(g)) return 'غير متوفر';
+  if (gamma === undefined || gamma === null || isNaN(g)) {
+    return 'غير متوفر';
+  }
+
   if (g >= 0.08) return 'مرتفع جدًا';
   if (g >= 0.04) return 'مرتفع';
   if (g >= 0.02) return 'متوسط';
@@ -189,6 +219,70 @@ function pnlPercent(entry, current) {
   return (((current - entry) / entry) * 100).toFixed(2);
 }
 
+function tradeKey(symbol) {
+  return String(symbol || '').toUpperCase();
+}
+
+function alreadyHasActiveTrade(symbol) {
+  return activeTrades.has(tradeKey(symbol));
+}
+
+function markTradeActive(trade) {
+  activeTrades.set(tradeKey(trade.symbol), trade);
+}
+
+function removeTrade(symbol) {
+  activeTrades.delete(tradeKey(symbol));
+}
+
+function wasSentToday(trade) {
+  const key =
+    `${todayKey()}-${trade.symbol}-${trade.type}-${trade.strike}-${trade.expiration}`;
+
+  return sentToday.has(key);
+}
+
+function markSentToday(trade) {
+  const key =
+    `${todayKey()}-${trade.symbol}-${trade.type}-${trade.strike}-${trade.expiration}`;
+
+  sentToday.add(key);
+}
+
+function tradeTitle(trade) {
+  return `${trade.symbol} ${trade.type} ${trade.strike}`;
+}
+
+function isETF(symbol) {
+  return ['SPY', 'QQQ'].includes(String(symbol).toUpperCase());
+}
+
+function isAllowedSignalTime(symbol) {
+  const now = new Date();
+
+  const saTime = new Date(
+    now.toLocaleString('en-US', {
+      timeZone: 'Asia/Riyadh'
+    })
+  );
+
+  const hour = saTime.getHours();
+  const minute = saTime.getMinutes();
+  const totalMinutes = hour * 60 + minute;
+
+  const start = 16 * 60 + 30; // 4:30 PM Saudi
+  const stocksEnd = 23 * 60; // 11:00 PM Saudi
+  const etfEnd = 24 * 60; // 12:00 AM Saudi
+
+  if (totalMinutes < start) return false;
+
+  if (isETF(symbol)) {
+    return totalMinutes <= etfEnd;
+  }
+
+  return totalMinutes <= stocksEnd;
+}
+
 // =====================
 // Massive API
 // =====================
@@ -202,10 +296,32 @@ async function apiGet(url) {
   const data = await res.json();
 
   if (!res.ok) {
-    throw new Error(data?.error || data?.message || 'API Error');
+    throw new Error(
+      data?.error ||
+      data?.message ||
+      'API Error'
+    );
   }
 
   return data;
+}
+
+async function isMarketOpenNow() {
+  try {
+    const url =
+      `https://api.massive.com/v1/marketstatus/now?apiKey=${API_KEY}`;
+
+    const data = await apiGet(url);
+
+    return (
+      data?.market === 'open' ||
+      data?.exchanges?.nasdaq === 'open' ||
+      data?.exchanges?.nyse === 'open'
+    );
+  } catch (err) {
+    console.error('Market Status Error:', err.message);
+    return false;
+  }
 }
 
 async function getStockSnapshot(symbol) {
@@ -217,7 +333,9 @@ async function getStockSnapshot(symbol) {
 
   if (!r) return null;
 
-  const change = r.o ? ((r.c - r.o) / r.o) * 100 : null;
+  const change = r.o
+    ? ((r.c - r.o) / r.o) * 100
+    : null;
 
   return {
     symbol,
@@ -229,6 +347,7 @@ async function getStockSnapshot(symbol) {
     change
   };
 }
+
 async function getOptionsChain(symbol) {
   const url =
     `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
@@ -246,7 +365,6 @@ async function getOptionSnapshot(contractTicker) {
 
   return data.results || data;
 }
-
 // =====================
 // Image Card
 // =====================
@@ -336,7 +454,6 @@ function isCandidateContract(item, stock) {
   if (dist > MAX_DISTANCE_PERCENT) return false;
   if (spread > MAX_SPREAD_PERCENT) return false;
 
-  // لا نرسل صفقة عكس الاتجاه إلا إذا السيولة قوية جدًا
   if (momentum !== 'NEUTRAL' && type !== momentum) {
     const strongContrarian =
       volume > oi * 4 &&
@@ -346,7 +463,6 @@ function isCandidateContract(item, stock) {
     if (!strongContrarian) return false;
   }
 
-  // لا نختار عقود منتهية أو بعيدة جدًا
   if (dte < 0 || dte > 10) return false;
 
   return true;
@@ -366,51 +482,43 @@ function contractScore(item, stock) {
 
   let score = 0;
 
-  // السيولة
   score += Math.min(volume / 100, 500);
   score += Math.min(oi / 100, 200);
 
-  // دخول جديد
   if (volume > oi) score += 300;
   if (volume > oi * 2) score += 200;
   if (volume > oi * 4) score += 200;
 
-  // Gamma
   if (gamma >= 0.08) score += 350;
   else if (gamma >= 0.04) score += 250;
   else if (gamma >= 0.02) score += 120;
 
-  // Delta
   if (delta >= 0.28 && delta <= 0.40) score += 250;
   else if (delta >= 0.25 && delta <= 0.45) score += 150;
 
-  // قرب السعر
   if (dist !== null) {
     if (dist <= 0.5) score += 300;
     else if (dist <= 1) score += 220;
     else if (dist <= 2) score += 120;
   }
 
-  // السعر المطلوب
   if (mid >= 1.5 && mid <= 2.5) score += 250;
 
-  // السبريد
   if (spread <= 6) score += 180;
   else if (spread <= 10) score += 100;
   else if (spread <= 15) score += 40;
 
-  // اليومي ثم الأسبوعي
   if (dte <= 1) score += 150;
   else if (dte <= 5) score += 100;
   else if (dte <= 10) score += 50;
 
-  // توافق الاتجاه
   if (momentum !== 'NEUTRAL' && type === momentum) {
     score += 250;
   }
 
   return Math.round(score);
 }
+
 function selectBestContract(symbol, stock, chain) {
   const candidates = chain
     .filter(item => isCandidateContract(item, stock))
@@ -420,9 +528,7 @@ function selectBestContract(symbol, stock, chain) {
     }))
     .sort((a, b) => b.score - a.score);
 
-  if (!candidates.length) {
-    return null;
-  }
+  if (!candidates.length) return null;
 
   const best = candidates[0];
   const item = best.item;
@@ -431,19 +537,14 @@ function selectBestContract(symbol, stock, chain) {
   const strike = getStrike(item);
   const expiration = getExpiration(item);
   const contractTicker = getContractTicker(item);
-
   const entry = getMidPrice(item);
 
-  if (!contractTicker || !entry) {
-    return null;
-  }
+  if (!contractTicker || !entry) return null;
 
   const stop = Number((entry - STOP_LOSS_DOLLARS).toFixed(2));
   const target = Number((entry + TAKE_PROFIT_DOLLARS).toFixed(2));
 
-  if (stop <= 0) {
-    return null;
-  }
+  if (stop <= 0) return null;
 
   return {
     symbol,
@@ -470,40 +571,9 @@ function selectBestContract(symbol, stock, chain) {
     status: 'OPEN'
   };
 }
-
-function tradeKey(symbol) {
-  return String(symbol || '').toUpperCase();
-}
-
-function alreadyHasActiveTrade(symbol) {
-  return activeTrades.has(tradeKey(symbol));
-}
-
-function markTradeActive(trade) {
-  activeTrades.set(tradeKey(trade.symbol), trade);
-}
-
-function removeTrade(symbol) {
-  activeTrades.delete(tradeKey(symbol));
-}
-
-function wasSentToday(trade) {
-  const key =
-    `${todayKey()}-${trade.symbol}-${trade.type}-${trade.strike}-${trade.expiration}`;
-
-  return sentToday.has(key);
-}
-
-function markSentToday(trade) {
-  const key =
-    `${todayKey()}-${trade.symbol}-${trade.type}-${trade.strike}-${trade.expiration}`;
-
-  sentToday.add(key);
-}
-
-function tradeTitle(trade) {
-  return `${trade.symbol} ${trade.type} ${trade.strike}`;
-}
+// =====================
+// Trade Messages
+// =====================
 
 async function sendTradeEntry(trade) {
   const image = await createTradeImage(trade.type);
@@ -634,54 +704,138 @@ async function sendTargetHit(trade) {
     message_thread_id: THREAD_ID
   });
 }
+
+// =====================
+// Scanner
+// =====================
+
+async function scanSingleSymbol(symbol, force = false) {
+  symbol = String(symbol || '').trim().toUpperCase();
+
+  if (!symbol) {
+    return {
+      ok: false,
+      message: '⚠️ الرمز غير صحيح.'
+    };
+  }
+
+  if (botPaused && !force) {
+    return {
+      ok: false,
+      message: '⏸ البوت متوقف عن طرح صفقات جديدة.'
+    };
+  }
+
+  if (!force && blockedSymbols.has(symbol)) {
+    return {
+      ok: false,
+      message: `⛔ ${symbol} موقوف من طرح الصفقات.`
+    };
+  }
+
+  if (alreadyHasActiveTrade(symbol)) {
+    return {
+      ok: false,
+      message: `⚠️ يوجد صفقة مفتوحة مسبقًا على ${symbol}.`
+    };
+  }
+
+  const marketOpen = await isMarketOpenNow();
+
+  if (!marketOpen) {
+    return {
+      ok: false,
+      message: '⛔ السوق مغلق حالياً، لا يتم طرح صفقات.'
+    };
+  }
+
+  if (!isAllowedSignalTime(symbol)) {
+    return {
+      ok: false,
+      message: `⛔ الوقت الحالي خارج وقت طرح صفقات ${symbol}.`
+    };
+  }
+
+  const stock = await getStockSnapshot(symbol);
+
+  if (!stock) {
+    return {
+      ok: false,
+      message: `⚠️ لم أستطع جلب بيانات ${symbol}.`
+    };
+  }
+
+  const chain = await getOptionsChain(symbol);
+
+  if (!chain.length) {
+    return {
+      ok: false,
+      message: `⚠️ لا توجد عقود متاحة على ${symbol}.`
+    };
+  }
+
+  const trade = selectBestContract(symbol, stock, chain);
+
+  if (!trade) {
+    return {
+      ok: false,
+      message: `⚠️ لا توجد صفقة قوية مطابقة للشروط على ${symbol} حالياً.`
+    };
+  }
+
+  if (!force && wasSentToday(trade)) {
+    return {
+      ok: false,
+      message: `⚠️ تم إرسال نفس صفقة ${symbol} اليوم سابقًا.`
+    };
+  }
+
+  markTradeActive(trade);
+  markSentToday(trade);
+
+  await sendTradeEntry(trade);
+
+  return {
+    ok: true,
+    message: `✅ تم إرسال صفقة ${symbol}.`
+  };
+}
+
 async function scanForTrades() {
   resetDailyMemoryIfNeeded();
 
+  if (botPaused) {
+    console.log('⏸ Bot paused. No new trades.');
+    return;
+  }
+
+  const marketOpen = await isMarketOpenNow();
+
+  if (!marketOpen) {
+    console.log('⛔ Market closed. No new trades.');
+    return;
+  }
+
   for (const symbol of SYMBOLS) {
     try {
-      if (alreadyHasActiveTrade(symbol)) {
-        continue;
+      if (blockedSymbols.has(symbol)) continue;
+      if (!isAllowedSignalTime(symbol)) continue;
+      if (alreadyHasActiveTrade(symbol)) continue;
+
+      const result = await scanSingleSymbol(symbol, false);
+
+      if (result.ok) {
+        console.log(result.message);
       }
-
-      const stock = await getStockSnapshot(symbol);
-
-      if (!stock) {
-        continue;
-      }
-
-      const chain = await getOptionsChain(symbol);
-
-      if (!chain.length) {
-        continue;
-      }
-
-      const trade = selectBestContract(symbol, stock, chain);
-
-      if (!trade) {
-        continue;
-      }
-
-      if (wasSentToday(trade)) {
-        continue;
-      }
-
-      markTradeActive(trade);
-      markSentToday(trade);
-
-      await sendTradeEntry(trade);
-
-      console.log(
-        `✅ New trade sent: ${trade.symbol} ${trade.type} ${trade.strike}`
-      );
 
     } catch (err) {
-      console.error(
-        `Scan Error ${symbol}:`,
-        err.message
-      );
+      console.error(`Scan Error ${symbol}:`, err.message);
     }
   }
 }
+// =====================
+// Trade Updates
+// =====================
 
 async function refreshTradePrice(trade) {
   const snapshot = await getOptionSnapshot(trade.contractTicker);
@@ -698,15 +852,11 @@ async function refreshTradePrice(trade) {
 async function updateActiveTrades() {
   for (const [symbol, trade] of activeTrades.entries()) {
     try {
-      if (trade.status !== 'OPEN') {
-        continue;
-      }
+      if (trade.status !== 'OPEN') continue;
 
       const current = await refreshTradePrice(trade);
 
-      if (!current) {
-        continue;
-      }
+      if (!current) continue;
 
       trade.current = current;
 
@@ -716,7 +866,6 @@ async function updateActiveTrades() {
         await sendStopHit(trade);
 
         removeTrade(symbol);
-
         continue;
       }
 
@@ -726,7 +875,6 @@ async function updateActiveTrades() {
         trade.current > trade.stop
       ) {
         trade.warnedStop = true;
-
         await sendNearStopWarning(trade);
       }
 
@@ -736,7 +884,6 @@ async function updateActiveTrades() {
         await sendTargetHit(trade);
 
         removeTrade(symbol);
-
         continue;
       }
 
@@ -747,10 +894,7 @@ async function updateActiveTrades() {
       }
 
     } catch (err) {
-      console.error(
-        `Update Error ${symbol}:`,
-        err.message
-      );
+      console.error(`Update Error ${symbol}:`, err.message);
     }
   }
 }
@@ -760,58 +904,126 @@ async function updateActiveTrades() {
 // =====================
 
 bot.onText(/\/start/, async (msg) => {
-  await bot.sendMessage(
-    msg.chat.id,
+  await sendToSameTopic(
+    msg,
     '🚀 ST Signals Bot يعمل بنجاح'
   );
 });
 
-bot.onText(/\/status/, async (msg) => {
-  const lines = [];
+bot.onText(/\/pause/, async (msg) => {
+  if (!isAdmin(msg)) return;
 
-  lines.push('📊 حالة بوت الصفقات');
-  lines.push('');
-  lines.push(`عدد الصفقات المفتوحة: ${activeTrades.size}`);
-  lines.push('');
+  botPaused = true;
 
-  if (!activeTrades.size) {
-    lines.push('لا توجد صفقات مفتوحة حالياً.');
-  } else {
-    for (const [, trade] of activeTrades.entries()) {
-      lines.push(
-        `${trade.symbol} ${trade.type} ${trade.strike} | الدخول $${fmtPrice(trade.entry)} | الحالي $${fmtPrice(trade.current)}`
-      );
-    }
-  }
-
-  await bot.sendMessage(
-    msg.chat.id,
-    lines.join('\n')
+  await sendToSameTopic(
+    msg,
+    '⏸ تم إيقاف طرح الصفقات الجديدة.'
   );
 });
 
-bot.onText(/\/scan/, async (msg) => {
-  await bot.sendMessage(
-    msg.chat.id,
-    '🔎 جاري فحص السوق الآن...'
-  );
+bot.onText(/\/resume/, async (msg) => {
+  if (!isAdmin(msg)) return;
 
-  await scanForTrades();
+  botPaused = false;
 
-  await bot.sendMessage(
-    msg.chat.id,
-    '✅ انتهى الفحص.'
+  await sendToSameTopic(
+    msg,
+    '▶️ تم تشغيل طرح الصفقات من جديد.'
   );
 });
 
-bot.onText(/\/stoptrade (.+)/, async (msg, match) => {
-  const symbol = String(match[1] || '')
-    .trim()
-    .toUpperCase();
+bot.onText(/\/botstatus/, async (msg) => {
+  if (!isAdmin(msg)) return;
+
+  const openTrades = [...activeTrades.values()]
+    .map(t =>
+      `• ${t.symbol} ${t.type} ${t.strike} | دخول $${fmtPrice(t.entry)} | حالي $${fmtPrice(t.current)}`
+    )
+    .join('\n');
+
+  await sendToSameTopic(
+    msg,
+`📊 حالة بوت الصفقات
+
+الحالة:
+${botPaused ? '⏸ متوقف عن طرح صفقات جديدة' : '▶️ يعمل ويبحث عن فرص'}
+
+عدد الصفقات المفتوحة:
+${activeTrades.size}
+
+الأسهم الموقوفة:
+${blockedSymbols.size ? [...blockedSymbols].join(', ') : 'لا يوجد'}
+
+الصفقات المفتوحة:
+${openTrades || 'لا توجد صفقات مفتوحة'}`
+  );
+});
+
+bot.onText(/\/signal\s+([A-Za-z]{1,10})/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+
+  const symbol = match[1].toUpperCase();
+
+  await sendToSameTopic(
+    msg,
+    `🔎 جاري فحص ${symbol}...`
+  );
+
+  const result = await scanSingleSymbol(symbol, true);
+
+  await sendToSameTopic(
+    msg,
+    result.message
+  );
+});
+
+bot.onText(/\/block\s+([A-Za-z]{1,10})/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+
+  const symbol = match[1].toUpperCase();
+
+  blockedSymbols.add(symbol);
+
+  await sendToSameTopic(
+    msg,
+    `⛔ تم إيقاف طرح صفقات ${symbol}.`
+  );
+});
+
+bot.onText(/\/unblock\s+([A-Za-z]{1,10})/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+
+  const symbol = match[1].toUpperCase();
+
+  blockedSymbols.delete(symbol);
+
+  await sendToSameTopic(
+    msg,
+    `✅ تم إعادة تفعيل صفقات ${symbol}.`
+  );
+});
+
+bot.onText(/\/blocks/, async (msg) => {
+  if (!isAdmin(msg)) return;
+
+  const list = [...blockedSymbols];
+
+  await sendToSameTopic(
+    msg,
+    list.length
+      ? `⛔ الأسهم الموقوفة:\n${list.join('\n')}`
+      : '✅ لا توجد أسهم موقوفة.'
+  );
+});
+
+bot.onText(/\/stoptrade\s+([A-Za-z]{1,10})/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+
+  const symbol = match[1].toUpperCase();
 
   if (!activeTrades.has(symbol)) {
-    await bot.sendMessage(
-      msg.chat.id,
+    await sendToSameTopic(
+      msg,
       `لا توجد صفقة مفتوحة على ${symbol}`
     );
 
@@ -820,9 +1032,25 @@ bot.onText(/\/stoptrade (.+)/, async (msg, match) => {
 
   removeTrade(symbol);
 
-  await bot.sendMessage(
-    msg.chat.id,
+  await sendToSameTopic(
+    msg,
     `🛑 تم حذف الصفقة المفتوحة على ${symbol}`
+  );
+});
+
+bot.onText(/\/scan/, async (msg) => {
+  if (!isAdmin(msg)) return;
+
+  await sendToSameTopic(
+    msg,
+    '🔎 جاري فحص السوق الآن...'
+  );
+
+  await scanForTrades();
+
+  await sendToSameTopic(
+    msg,
+    '✅ انتهى الفحص.'
   );
 });
 
