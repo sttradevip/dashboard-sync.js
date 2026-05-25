@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const sharp = require('sharp');
+const { createCanvas } = require('canvas');
 
 const token = process.env.BOT_TOKEN;
 
@@ -7,199 +7,111 @@ const bot = new TelegramBot(token, {
   polling: true
 });
 
-// ===============================
-// إعدادات القناة والموضوع
-// ===============================
-
-const CHANNEL_ID = -1002840761137;
+// معلومات القناة
+const CHAT_ID = '-1002840761137';
 const THREAD_ID = 12385;
 
-// ===============================
 // الأسهم المسموحة
-// ===============================
+const symbols = ['TSLA', 'NVDA', 'AMZN', 'SPY', 'QQQ', 'META'];
 
-const allowedSymbols = [
-  'TSLA',
-  'NVDA',
-  'AMZN',
-  'SPY',
-  'QQQ',
-  'META'
-];
+// حفظ الصفقات الحالية
+const activeTrades = {};
 
-// ===============================
-// تخزين الصفقات
-// ===============================
-
-const activeSignals = {};
-
-// ===============================
 // إنشاء صورة احترافية
-// ===============================
+async function createTradeImage(symbol, type, entry) {
 
-async function createCard(signal) {
+  const canvas = createCanvas(800, 450);
+  const ctx = canvas.getContext('2d');
 
-  const isCall = signal.type === 'CALL';
+  // خلفية
+  ctx.fillStyle = '#050816';
+  ctx.fillRect(0, 0, 800, 450);
 
-  const mainColor = isCall
-    ? '#00e676'
-    : '#ff1744';
+  // إطار
+  ctx.strokeStyle = type === 'CALL' ? '#00ff99' : '#ff2d55';
+  ctx.lineWidth = 8;
 
-  const svg = `
-<svg width="1080" height="1080" xmlns="http://www.w3.org/2000/svg">
+  ctx.beginPath();
+  ctx.roundRect(20, 20, 760, 410, 25);
+  ctx.stroke();
 
-  <rect width="1080" height="1080" fill="#07070b"/>
+  // عنوان
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 42px "DejaVu Sans"';
+  ctx.textAlign = 'center';
 
-  <rect
-    x="45"
-    y="45"
-    width="990"
-    height="990"
-    rx="52"
-    fill="#11111a"
-    stroke="${mainColor}"
-    stroke-width="9"
-  />
+  ctx.fillText('ST TRADE VIP', 400, 90);
 
-  <text
-    x="540"
-    y="150"
-    text-anchor="middle"
-    fill="#ffffff"
-    font-size="64"
-    font-family="Arial"
-    font-weight="bold">
-    ST TRADE VIP
-  </text>
+  // اسم السهم
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 90px "DejaVu Sans"';
 
-  <text
-    x="540"
-    y="390"
-    text-anchor="middle"
-    fill="#ffffff"
-    font-size="170"
-    font-family="Arial"
-    font-weight="bold">
-    ${signal.symbol}
-  </text>
+  ctx.fillText(symbol, 400, 210);
 
-  <text
-    x="540"
-    y="560"
-    text-anchor="middle"
-    fill="${mainColor}"
-    font-size="125"
-    font-family="Arial"
-    font-weight="bold">
-    ${signal.type}
-  </text>
+  // نوع العقد
+  ctx.fillStyle = type === 'CALL' ? '#00ff99' : '#ff2d55';
+  ctx.font = 'bold 60px "DejaVu Sans"';
 
-  <text
-    x="540"
-    y="760"
-    text-anchor="middle"
-    fill="#ffffff"
-    font-size="165"
-    font-family="Arial"
-    font-weight="bold">
-    $${signal.currentPrice.toFixed(2)}
-  </text>
+  ctx.fillText(type, 400, 300);
 
-  <text
-    x="540"
-    y="930"
-    text-anchor="middle"
-    fill="#8f8f9a"
-    font-size="44"
-    font-family="Arial"
-    font-weight="bold">
-    ST OPTIONS SIGNAL
-  </text>
+  // السعر
+  ctx.fillStyle = '#ffd166';
+  ctx.font = 'bold 55px "DejaVu Sans"';
 
-</svg>
-`;
+  ctx.fillText(`$${entry}`, 400, 380);
 
-  const fileName = `signal-${Date.now()}.png`;
-
-  await sharp(Buffer.from(svg))
-    .png()
-    .toFile(fileName);
-
-  return fileName;
+  return canvas.toBuffer();
 }
 
-// ===============================
-// إنشاء صفقة
-// ===============================
+// إرسال صفقة جديدة
+async function sendNewTrade(symbol) {
 
-function generateSignal(symbol) {
+  const type = Math.random() > 0.5 ? 'CALL' : 'PUT';
 
-  const type = Math.random() > 0.5
-    ? 'CALL'
-    : 'PUT';
+  const entry = (1.50 + Math.random()).toFixed(2);
 
-  const strike = Math.floor(
-    100 + Math.random() * 400
-  );
+  const strike = Math.floor(200 + Math.random() * 300);
 
-  const entry = Number(
-    (1.50 + Math.random()).toFixed(2)
-  );
+  const stop = (entry - 0.30).toFixed(2);
 
-  const stopLoss = Number(
-    (entry - 0.40).toFixed(2)
-  );
+  const target = (parseFloat(entry) + 0.80).toFixed(2);
 
-  const target = Number(
-    (entry + 0.80).toFixed(2)
-  );
-
-  return {
+  activeTrades[symbol] = {
     symbol,
     type,
     strike,
-    entry,
-    currentPrice: entry,
-    stopLoss,
-    target,
-    updates: 0
+    entry: parseFloat(entry),
+    current: parseFloat(entry),
+    stop: parseFloat(stop),
+    target: parseFloat(target)
   };
-}
 
-// ===============================
-// إرسال صفقة جديدة
-// ===============================
-
-async function sendSignal(signal) {
-
-  const image = await createCard(signal);
+  const image = await createTradeImage(
+    symbol,
+    type,
+    entry
+  );
 
   const text = `
 🚨 صفقة جديدة
 
-📊 السهم:
-${signal.symbol}
+📊 السهم: ${symbol}
 
-📈 نوع العقد:
-${signal.type}
+📈 نوع العقد: ${type}
 
-🎯 السترايك:
-${signal.strike}
+🎯 السترايك: ${strike}
 
-💰 سعر الدخول:
-$${signal.entry}
+💰 سعر الدخول: $${entry}
 
-🛑 وقف الخسارة:
-$${signal.stopLoss}
+🛑 وقف الخسارة: $${stop}
 
-🎯 الهدف:
-$${signal.target}
+🎯 الهدف: $${target}
 
 🔥 ST TRADE VIP
 `;
 
   await bot.sendPhoto(
-    CHANNEL_ID,
+    CHAT_ID,
     image,
     {
       caption: text,
@@ -208,260 +120,165 @@ $${signal.target}
   );
 }
 
-// ===============================
-// تحديث الصفقة
-// ===============================
+// تحديث الصفقات
+async function updateTrades() {
 
-async function updateSignal(signal) {
+  for (const symbol in activeTrades) {
 
-  const moveUp = Math.random() > 0.5;
+    const trade = activeTrades[symbol];
 
-  if (moveUp) {
-    signal.currentPrice += 0.10;
-  } else {
-    signal.currentPrice -= 0.10;
-  }
+    const move = (Math.random() * 0.20 - 0.05);
 
-  signal.currentPrice = Number(
-    signal.currentPrice.toFixed(2)
-  );
+    trade.current += move;
 
-  const pnl = (
-    (
-      (signal.currentPrice - signal.entry)
-      / signal.entry
-    ) * 100
-  ).toFixed(2);
+    trade.current =
+      parseFloat(trade.current.toFixed(2));
 
-  // قرب الوقف
-  if (
-    signal.currentPrice <=
-    signal.stopLoss + 0.10
-  ) {
+    const profit =
+      (
+        ((trade.current - trade.entry)
+        / trade.entry) * 100
+      ).toFixed(2);
 
-    await bot.sendMessage(
-      CHANNEL_ID,
+    // تحديث كل 0.10
+    if (
+      Math.abs(
+        trade.current - trade.entry
+      ) >= 0.10
+    ) {
+
+      const text = `
+🚨 تحديث الصفقة
+
+📊 السهم: ${trade.symbol}
+
+📈 نوع العقد: ${trade.type}
+
+🎯 السترايك: ${trade.strike}
+
+💰 الدخول: $${trade.entry.toFixed(2)}
+
+💵 السعر الحالي: $${trade.current.toFixed(2)}
+
+📈 نسبة الربح: ${profit}%
+
+🛑 الوقف: $${trade.stop.toFixed(2)}
+
+🎯 الهدف: $${trade.target.toFixed(2)}
+
+🔥 ST TRADE VIP
+`;
+
+      await bot.sendMessage(
+        CHAT_ID,
+        text,
+        {
+          message_thread_id: THREAD_ID
+        }
+      );
+
+      trade.entry = trade.current;
+    }
+
+    // قرب الوقف
+    if (
+      trade.current <= trade.stop + 0.05 &&
+      trade.current > trade.stop
+    ) {
+
+      await bot.sendMessage(
+        CHAT_ID,
 `
-⚠️ تنبيه مهم
+⚠️ تنبيه
 
-العقد قريب من وقف الخسارة
+الصفقة على ${trade.symbol}
+اقتربت من وقف الخسارة
 
-📊 ${signal.symbol}
-📈 ${signal.type}
-
-💰 السعر الحالي:
-$${signal.currentPrice}
-
-📉 نسبة الخسارة:
-${pnl}%
+💵 السعر الحالي:
+$${trade.current.toFixed(2)}
 `,
-      {
-        message_thread_id: THREAD_ID
-      }
-    );
-  }
+        {
+          message_thread_id: THREAD_ID
+        }
+      );
+    }
 
-  // ضرب الوقف
-  if (
-    signal.currentPrice <= signal.stopLoss
-  ) {
+    // ضرب الوقف
+    if (trade.current <= trade.stop) {
 
-    await bot.sendMessage(
-      CHANNEL_ID,
+      await bot.sendMessage(
+        CHAT_ID,
 `
 ❌ تم ضرب وقف الخسارة
 
-📊 ${signal.symbol}
-📈 ${signal.type}
+📊 ${trade.symbol}
 
-💰 السعر النهائي:
-$${signal.currentPrice}
-
-📉 الخسارة:
-${pnl}%
+💵 السعر:
+$${trade.current.toFixed(2)}
 `,
-      {
-        message_thread_id: THREAD_ID
-      }
-    );
+        {
+          message_thread_id: THREAD_ID
+        }
+      );
 
-    delete activeSignals[signal.symbol];
+      delete activeTrades[symbol];
 
-    return;
-  }
-
-  // تحقق الهدف
-  if (
-    signal.currentPrice >= signal.target
-  ) {
-
-    await bot.sendMessage(
-      CHANNEL_ID,
-`
-🎯 تحقق الهدف بنجاح
-
-📊 ${signal.symbol}
-📈 ${signal.type}
-
-💰 السعر النهائي:
-$${signal.currentPrice}
-
-📈 الربح:
-+${pnl}%
-`,
-      {
-        message_thread_id: THREAD_ID
-      }
-    );
-
-    delete activeSignals[signal.symbol];
-
-    return;
-  }
-
-  // تحديث عادي
-  const image = await createCard(signal);
-
-  await bot.sendPhoto(
-    CHANNEL_ID,
-    image,
-    {
-      caption:
-`
-🚨 تحديث الصفقة
-
-📊 السهم:
-${signal.symbol}
-
-📈 نوع العقد:
-${signal.type}
-
-💰 السعر الحالي:
-$${signal.currentPrice}
-
-📊 نسبة الربح / الخسارة:
-${pnl}%
-
-🎯 الهدف:
-$${signal.target}
-
-🛑 الوقف:
-$${signal.stopLoss}
-
-🔥 ST TRADE VIP
-`,
-      message_thread_id: THREAD_ID
-    }
-  );
-}
-
-// ===============================
-// إرسال تلقائي
-// ===============================
-
-async function autoScanner() {
-
-  const symbol =
-    allowedSymbols[
-      Math.floor(
-        Math.random() * allowedSymbols.length
-      )
-    ];
-
-  // منع تكرار نفس السهم
-  if (activeSignals[symbol]) {
-    return;
-  }
-
-  const signal = generateSignal(symbol);
-
-  activeSignals[symbol] = signal;
-
-  await sendSignal(signal);
-
-  // تحديثات مستمرة
-  const interval = setInterval(async () => {
-
-    if (!activeSignals[symbol]) {
-      clearInterval(interval);
-      return;
+      continue;
     }
 
-    await updateSignal(signal);
+    // تحقق الهدف
+    if (trade.current >= trade.target) {
 
-  }, 60000);
+      await bot.sendMessage(
+        CHAT_ID,
+`
+✅ تحقق الهدف
+
+📊 ${trade.symbol}
+
+💵 السعر:
+$${trade.current.toFixed(2)}
+
+📈 الربح النهائي:
+${profit}%
+`,
+        {
+          message_thread_id: THREAD_ID
+        }
+      );
+
+      delete activeTrades[symbol];
+    }
+  }
 }
 
-// ===============================
-// تشغيل تلقائي كل 5 دقائق
-// ===============================
-
-setInterval(() => {
-  autoScanner();
-}, 300000);
-
-// ===============================
-// أوامر البوت
-// ===============================
-
+// تشغيل البوت
 bot.onText(/\/start/, async (msg) => {
 
   await bot.sendMessage(
     msg.chat.id,
     '🚀 ST Signals Bot يعمل بنجاح'
   );
-
 });
 
-// ===============================
-// استخراج IDs
-// ===============================
+// إرسال صفقات تجريبية تلقائياً
+setInterval(async () => {
 
-bot.onText(/\/topicid/, async (msg) => {
+  const randomSymbol =
+    symbols[
+      Math.floor(
+        Math.random() * symbols.length
+      )
+    ];
 
-  await bot.sendMessage(
-    msg.chat.id,
-`
-📌 معلومات الموضوع
+  if (!activeTrades[randomSymbol]) {
 
-Chat ID:
-${msg.chat.id}
-
-Thread ID:
-${msg.message_thread_id || 'لا يوجد'}
-`
-  );
-
-});
-
-// ===============================
-// فحص يدوي
-// ===============================
-
-bot.onText(/\/scan (.+)/, async (msg, match) => {
-
-  const symbol = match[1]
-    .toUpperCase()
-    .trim();
-
-  if (
-    !allowedSymbols.includes(symbol)
-  ) {
-
-    return bot.sendMessage(
-      msg.chat.id,
-      '❌ السهم غير مدعوم'
-    );
+    await sendNewTrade(randomSymbol);
   }
 
-  const signal = generateSignal(symbol);
+}, 60000);
 
-  activeSignals[symbol] = signal;
-
-  await sendSignal(signal);
-
-});
-
-// ===============================
+// تحديث الصفقات
+setInterval(updateTrades, 30000);
 
 console.log('🚀 ST Signals Bot Started');
