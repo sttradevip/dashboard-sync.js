@@ -431,7 +431,100 @@ function spreadPercent(item) {
   return ((ask - bid) / mid) * 100;
 }
 
-function isCandidateContract(item, stock) {
+function flowItemScore(item, stock) {
+  const type = getContractType(item);
+  const strike = getStrike(item);
+  const volume = getVolume(item);
+  const oi = getOI(item);
+  const gamma = Number(getGamma(item) || 0);
+  const delta = Math.abs(Number(getDelta(item) || 0));
+  const dist = distancePercent(strike, stock.price);
+  const mid = getMidPrice(item);
+
+  if (!['CALL', 'PUT'].includes(type)) return 0;
+  if (!strike || dist === null) return 0;
+  if (dist > 3) return 0;
+  if (!mid || mid <= 0) return 0;
+
+  let score = 0;
+
+  score += Math.min(volume / 100, 500);
+  score += Math.min(oi / 150, 150);
+
+  if (volume > oi) score += 250;
+  if (volume > oi * 2) score += 200;
+  if (volume > oi * 4) score += 150;
+
+  if (gamma >= 0.08) score += 300;
+  else if (gamma >= 0.04) score += 220;
+  else if (gamma >= 0.02) score += 100;
+
+  if (delta >= 0.25 && delta <= 0.45) score += 150;
+
+  if (dist <= 0.5) score += 200;
+  else if (dist <= 1) score += 150;
+  else if (dist <= 2) score += 80;
+
+  return score;
+}
+
+function getFlowBias(chain, stock) {
+  let callScore = 0;
+  let putScore = 0;
+
+  for (const item of chain) {
+    const type = getContractType(item);
+    const score = flowItemScore(item, stock);
+
+    if (type === 'CALL') callScore += score;
+    if (type === 'PUT') putScore += score;
+  }
+
+  if (callScore > putScore * 1.30) {
+    return {
+      side: 'CALL',
+      callScore,
+      putScore,
+      strength: 'STRONG'
+    };
+  }
+
+  if (putScore > callScore * 1.30) {
+    return {
+      side: 'PUT',
+      callScore,
+      putScore,
+      strength: 'STRONG'
+    };
+  }
+
+  if (callScore > putScore * 1.10) {
+    return {
+      side: 'CALL',
+      callScore,
+      putScore,
+      strength: 'MILD'
+    };
+  }
+
+  if (putScore > callScore * 1.10) {
+    return {
+      side: 'PUT',
+      callScore,
+      putScore,
+      strength: 'MILD'
+    };
+  }
+
+  return {
+    side: 'NEUTRAL',
+    callScore,
+    putScore,
+    strength: 'NEUTRAL'
+  };
+}
+
+function isCandidateContract(item, stock, flowBias = null) {
   const type = getContractType(item);
   const strike = getStrike(item);
   const volume = getVolume(item);
@@ -454,21 +547,39 @@ function isCandidateContract(item, stock) {
   if (dist > MAX_DISTANCE_PERCENT) return false;
   if (spread > MAX_SPREAD_PERCENT) return false;
 
+  if (dte < 0 || dte > 10) return false;
+
+  // لا نعاند تدفق قوي جدًا
+  if (
+    flowBias &&
+    flowBias.strength === 'STRONG' &&
+    flowBias.side !== 'NEUTRAL' &&
+    type !== flowBias.side
+  ) {
+    return false;
+  }
+
+  // لا نرسل عكس الاتجاه إلا إذا التدفق يدعمه بقوة
   if (momentum !== 'NEUTRAL' && type !== momentum) {
+    const flowSupportsContrarian =
+      flowBias &&
+      flowBias.side === type &&
+      flowBias.strength === 'STRONG';
+
     const strongContrarian =
       volume > oi * 4 &&
       gamma >= 0.04 &&
       dist <= 1;
 
-    if (!strongContrarian) return false;
+    if (!flowSupportsContrarian && !strongContrarian) {
+      return false;
+    }
   }
-
-  if (dte < 0 || dte > 10) return false;
 
   return true;
 }
 
-function contractScore(item, stock) {
+function contractScore(item, stock, flowBias = null) {
   const type = getContractType(item);
   const volume = getVolume(item);
   const oi = getOI(item);
@@ -516,15 +627,35 @@ function contractScore(item, stock) {
     score += 250;
   }
 
+  // مكافأة إذا العقد مع تدفق السوق
+  if (
+    flowBias &&
+    flowBias.side === type &&
+    flowBias.side !== 'NEUTRAL'
+  ) {
+    score += flowBias.strength === 'STRONG' ? 350 : 150;
+  }
+
+  // خصم إذا العقد ضد تدفق السوق
+  if (
+    flowBias &&
+    flowBias.side !== 'NEUTRAL' &&
+    flowBias.side !== type
+  ) {
+    score -= flowBias.strength === 'STRONG' ? 500 : 200;
+  }
+
   return Math.round(score);
 }
 
 function selectBestContract(symbol, stock, chain) {
+  const flowBias = getFlowBias(chain, stock);
+
   const candidates = chain
-    .filter(item => isCandidateContract(item, stock))
+    .filter(item => isCandidateContract(item, stock, flowBias))
     .map(item => ({
       item,
-      score: contractScore(item, stock)
+      score: contractScore(item, stock, flowBias)
     }))
     .sort((a, b) => b.score - a.score);
 
@@ -558,6 +689,8 @@ function selectBestContract(symbol, stock, chain) {
     stop,
     target,
     score: best.score,
+    flowBias: flowBias.side,
+    flowStrength: flowBias.strength,
     volume: getVolume(item),
     oi: getOI(item),
     delta: getDelta(item),
