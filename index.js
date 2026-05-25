@@ -1,8 +1,8 @@
 const TelegramBot = require('node-telegram-bot-api');
+const sharp = require('sharp');
+const fs = require('fs');
 
-const token = process.env.BOT_TOKEN;
-
-const bot = new TelegramBot(token, {
+const bot = new TelegramBot(process.env.BOT_TOKEN, {
   polling: true
 });
 
@@ -10,9 +10,8 @@ const SIGNALS_CHAT_ID =
   process.env.SIGNALS_CHAT_ID;
 
 const SIGNALS_THREAD_ID =
-  process.env.SIGNALS_THREAD_ID;
+  Number(process.env.SIGNALS_THREAD_ID);
 
-// الأسهم المسموحة
 const symbols = [
   'TSLA',
   'NVDA',
@@ -22,145 +21,383 @@ const symbols = [
   'META'
 ];
 
-// الصفقات المفتوحة
 const activeSignals = new Map();
-
-// منع التكرار
 const sentSignals = new Set();
 
-// تشغيل البوت
-bot.onText(/\/start/, async (msg) => {
+function pnlPercent(entry, current) {
 
-  await bot.sendMessage(
-    msg.chat.id,
-    '🚀 ST Signals Bot يعمل بنجاح'
+  return (
+    (
+      (current - entry) / entry
+    ) * 100
+  ).toFixed(2);
+
+}
+
+async function createCard(signal, status = 'ENTRY') {
+
+  const isCall =
+    signal.type === 'CALL';
+
+  const mainColor =
+    status === 'STOP'
+      ? '#ff1744'
+      : isCall
+      ? '#00e676'
+      : '#ff1744';
+
+  const title =
+    status === 'ENTRY'
+      ? 'صفقة جديدة'
+      : status === 'UPDATE'
+      ? 'تحديث الصفقة'
+      : status === 'TARGET'
+      ? 'تحقق الهدف'
+      : status === 'NEAR_STOP'
+      ? 'قريب من الوقف'
+      : 'ضرب وقف الخسارة';
+
+  const pnl =
+    pnlPercent(
+      signal.entry,
+      signal.currentPrice
+    );
+
+  const svg = `
+<svg width="1080" height="1080"
+xmlns="http://www.w3.org/2000/svg">
+
+<rect
+width="1080"
+height="1080"
+fill="#07070b"/>
+
+<rect
+x="40"
+y="40"
+width="1000"
+height="1000"
+rx="44"
+fill="#11111a"
+stroke="${mainColor}"
+stroke-width="8"/>
+
+<text
+x="540"
+y="130"
+text-anchor="middle"
+fill="#ffffff"
+font-size="58"
+font-family="Arial"
+font-weight="bold">
+ST TRADE VIP
+</text>
+
+<text
+x="540"
+y="210"
+text-anchor="middle"
+fill="${mainColor}"
+font-size="54"
+font-family="Arial"
+font-weight="bold">
+${title}
+</text>
+
+<text
+x="540"
+y="360"
+text-anchor="middle"
+fill="#ffffff"
+font-size="135"
+font-family="Arial"
+font-weight="bold">
+${signal.symbol}
+</text>
+
+<text
+x="540"
+y="470"
+text-anchor="middle"
+fill="${mainColor}"
+font-size="92"
+font-family="Arial"
+font-weight="bold">
+${signal.type}
+</text>
+
+<text
+x="540"
+y="620"
+text-anchor="middle"
+fill="#ffffff"
+font-size="118"
+font-family="Arial"
+font-weight="bold">
+${signal.strike}
+</text>
+
+<text
+x="180"
+y="740"
+fill="#9e9e9e"
+font-size="42"
+font-family="Arial">
+سعر الدخول
+</text>
+
+<text
+x="180"
+y="805"
+fill="#ffffff"
+font-size="68"
+font-family="Arial"
+font-weight="bold">
+$${signal.entry.toFixed(2)}
+</text>
+
+<text
+x="700"
+y="740"
+fill="#9e9e9e"
+font-size="42"
+font-family="Arial">
+السعر الحالي
+</text>
+
+<text
+x="700"
+y="805"
+fill="#ffffff"
+font-size="68"
+font-family="Arial"
+font-weight="bold">
+$${signal.currentPrice.toFixed(2)}
+</text>
+
+<text
+x="180"
+y="920"
+fill="#9e9e9e"
+font-size="42"
+font-family="Arial">
+الربح / الخسارة
+</text>
+
+<text
+x="180"
+y="985"
+fill="${
+  Number(pnl) >= 0
+  ? '#00e676'
+  : '#ff1744'
+}"
+font-size="68"
+font-family="Arial"
+font-weight="bold">
+${
+  Number(pnl) >= 0
+  ? '+'
+  : ''
+}${pnl}%
+</text>
+
+<text
+x="700"
+y="920"
+fill="#9e9e9e"
+font-size="42"
+font-family="Arial">
+وقف الخسارة
+</text>
+
+<text
+x="700"
+y="985"
+fill="#ff5252"
+font-size="68"
+font-family="Arial"
+font-weight="bold">
+$${signal.stopLoss.toFixed(2)}
+</text>
+
+</svg>
+`;
+
+  const file =
+    `signal-${Date.now()}.png`;
+
+  await sharp(
+    Buffer.from(svg)
+  )
+  .png()
+  .toFile(file);
+
+  return file;
+
+}
+
+async function sendPhotoCard(
+  signal,
+  status
+) {
+
+  const file =
+    await createCard(signal, status);
+
+  const pnl =
+    pnlPercent(
+      signal.entry,
+      signal.currentPrice
+    );
+
+  const caption =
+`🚨 ${status === 'ENTRY'
+? 'صفقة جديدة'
+: status === 'UPDATE'
+? 'تحديث الصفقة'
+: status === 'TARGET'
+? 'تحقق الهدف'
+: status === 'NEAR_STOP'
+? 'تنبيه مهم'
+: 'ضرب وقف الخسارة'}
+
+📊 السهم:
+${signal.symbol}
+
+📈 النوع:
+${signal.type}
+
+🎯 السترايك:
+${signal.strike}
+
+💰 سعر الدخول:
+$${signal.entry.toFixed(2)}
+
+📍 السعر الحالي:
+$${signal.currentPrice.toFixed(2)}
+
+${
+  Number(pnl) >= 0
+  ? '✅ نسبة الربح'
+  : '❌ نسبة الخسارة'
+}
+${pnl}%
+
+🛡 وقف الخسارة:
+$${signal.stopLoss.toFixed(2)}
+
+🔥 ST TRADE VIP`;
+
+  await bot.sendPhoto(
+    SIGNALS_CHAT_ID,
+    file,
+    {
+      message_thread_id:
+        SIGNALS_THREAD_ID,
+      caption
+    }
   );
 
-});
+  fs.unlinkSync(file);
 
-// استخراج معلومات الموضوع
-bot.onText(/\/topicid/, async (msg) => {
+}
 
-  await bot.sendMessage(
-    msg.chat.id,
-`📌 معلومات الموضوع:
-
-Chat ID:
-${msg.chat.id}
-
-Thread ID:
-${msg.message_thread_id || 'لا يوجد'}
-`
-  );
-
-});
-
-// إنشاء صفقة تجريبية
 function generateFakeSignal(symbol) {
 
-  const types = ['CALL', 'PUT'];
-
   const type =
-    types[Math.floor(Math.random() * types.length)];
+    Math.random() > 0.5
+      ? 'CALL'
+      : 'PUT';
 
   const entry =
-    Number((Math.random() * 1 + 1.5).toFixed(2));
-
-  const strike =
-    Math.floor(Math.random() * 300 + 100);
-
-  const confidence =
-    Math.floor(Math.random() * 10 + 90);
+    Number(
+      (
+        Math.random() * 1 + 1.5
+      ).toFixed(2)
+    );
 
   return {
     symbol,
     type,
-    strike,
-    confidence,
+    strike:
+      Math.floor(
+        Math.random() * 300 + 100
+      ),
     entry,
     currentPrice: entry,
-    stopLoss: Number((entry - 0.30).toFixed(2)),
-    nextUpdate: Number((entry + 0.10).toFixed(2)),
-    target: Number((entry + 0.50).toFixed(2)),
+    stopLoss:
+      Number(
+        (
+          entry - 0.30
+        ).toFixed(2)
+      ),
+    nextUpdate:
+      Number(
+        (
+          entry + 0.10
+        ).toFixed(2)
+      ),
+    target:
+      Number(
+        (
+          entry + 0.50
+        ).toFixed(2)
+      ),
     status: 'OPEN'
   };
 
 }
 
-// إرسال صفقة جديدة
 async function sendSignal(signal) {
 
-  const uniqueKey =
-    `${signal.symbol}-${signal.type}-${signal.strike}`;
+  const key =
+`${signal.symbol}-${signal.type}-${signal.strike}`;
 
-  if (sentSignals.has(uniqueKey)) {
+  if (
+    sentSignals.has(key)
+  ) {
     return;
   }
 
-  sentSignals.add(uniqueKey);
+  sentSignals.add(key);
 
-  activeSignals.set(uniqueKey, signal);
+  activeSignals.set(
+    key,
+    signal
+  );
 
-  const message = `
-🚨 ST TRADE VIP SIGNAL
-
-📊 ${signal.symbol}
-
-📈 Type: ${signal.type}
-
-🎯 Strike: ${signal.strike}
-
-💰 Entry: $${signal.entry}
-
-🛡 Stop Loss: $${signal.stopLoss}
-
-🎯 Target: $${signal.target}
-
-🔥 Confidence: ${signal.confidence}%
-
-#STTradeVIP
-`;
-
-  await bot.sendMessage(
-    SIGNALS_CHAT_ID,
-    message,
-    {
-      message_thread_id:
-        Number(SIGNALS_THREAD_ID)
-    }
+  await sendPhotoCard(
+    signal,
+    'ENTRY'
   );
 
 }
 
-// تحديثات الصفقات
 async function updateSignals() {
 
-  for (const [key, signal] of activeSignals) {
+  for (
+    const [key, signal]
+    of activeSignals
+  ) {
 
-    if (signal.status !== 'OPEN') {
+    if (
+      signal.status !== 'OPEN'
+    ) {
       continue;
     }
 
-    // حركة سعر تجريبية
     const movement =
-      (Math.random() * 0.20 - 0.05);
+      Math.random() * 0.20 - 0.05;
 
     signal.currentPrice =
       Number(
-        (signal.currentPrice + movement)
-        .toFixed(2)
+        (
+          signal.currentPrice +
+          movement
+        ).toFixed(2)
       );
 
-    // حساب النسبة
-    const pnl =
-      (
-        (
-          (signal.currentPrice - signal.entry)
-          / signal.entry
-        ) * 100
-      ).toFixed(2);
-
-    // قريب من الوقف
     if (
       signal.currentPrice <=
       signal.stopLoss + 0.05
@@ -169,124 +406,62 @@ async function updateSignals() {
       signal.stopLoss
     ) {
 
-      await bot.sendMessage(
-        SIGNALS_CHAT_ID,
-`
-⚠️ تنبيه مهم
-
-${signal.symbol} ${signal.type}
-
-💰 Entry: $${signal.entry}
-
-📉 Current: $${signal.currentPrice}
-
-❌ PNL: ${pnl}%
-
-🛡 قريب من وقف الخسارة
-`,
-        {
-          message_thread_id:
-            Number(SIGNALS_THREAD_ID)
-        }
+      await sendPhotoCard(
+        signal,
+        'NEAR_STOP'
       );
 
     }
 
-    // ضرب الوقف
     if (
       signal.currentPrice <=
       signal.stopLoss
     ) {
 
-      signal.status = 'STOPPED';
+      signal.status =
+        'STOPPED';
 
-      await bot.sendMessage(
-        SIGNALS_CHAT_ID,
-`
-🛑 تم ضرب وقف الخسارة
-
-${signal.symbol} ${signal.type}
-
-💰 Entry: $${signal.entry}
-
-📉 Exit: $${signal.currentPrice}
-
-❌ Final PNL: ${pnl}%
-`,
-        {
-          message_thread_id:
-            Number(SIGNALS_THREAD_ID)
-        }
+      await sendPhotoCard(
+        signal,
+        'STOP'
       );
 
       continue;
+
     }
 
-    // تحقيق الهدف
     if (
       signal.currentPrice >=
       signal.target
     ) {
 
-      signal.status = 'TARGET';
+      signal.status =
+        'TARGET';
 
-      await bot.sendMessage(
-        SIGNALS_CHAT_ID,
-`
-🎯 تم تحقيق الهدف
-
-${signal.symbol} ${signal.type}
-
-💰 Entry: $${signal.entry}
-
-📈 Exit: $${signal.currentPrice}
-
-✅ Final Profit: +${pnl}%
-`,
-        {
-          message_thread_id:
-            Number(SIGNALS_THREAD_ID)
-        }
+      await sendPhotoCard(
+        signal,
+        'TARGET'
       );
 
       continue;
+
     }
 
-    // تحديث كل +0.10
     if (
       signal.currentPrice >=
       signal.nextUpdate
     ) {
 
-      await bot.sendMessage(
-        SIGNALS_CHAT_ID,
-`
-🚀 تحديث الصفقة
-
-${signal.symbol} ${signal.type}
-
-💰 Entry: $${signal.entry}
-
-📈 Current: $${signal.currentPrice}
-
-✅ Profit: +${pnl}%
-
-🎯 Next Target:
-$${Number(
-  (signal.currentPrice + 0.10)
-  .toFixed(2)
-)}
-`,
-        {
-          message_thread_id:
-            Number(SIGNALS_THREAD_ID)
-        }
+      await sendPhotoCard(
+        signal,
+        'UPDATE'
       );
 
       signal.nextUpdate =
         Number(
           (
-            signal.currentPrice + 0.10
+            signal.currentPrice +
+            0.10
           ).toFixed(2)
         );
 
@@ -296,43 +471,57 @@ $${Number(
 
 }
 
-// فحص السوق
 async function scanMarket() {
 
-  console.log('📡 Scanning market...');
-
-  for (const symbol of symbols) {
+  for (
+    const symbol of symbols
+  ) {
 
     const signal =
       generateFakeSignal(symbol);
 
-    if (signal.confidence >= 90) {
-
-      await sendSignal(signal);
-
-      console.log(
-        `✅ Signal Sent: ${symbol}`
-      );
-
-    }
+    await sendSignal(signal);
 
   }
 
 }
 
-// تشغيل أول مرة
+bot.onText(
+  /\/start/,
+  async (msg) => {
+
+    await bot.sendMessage(
+      msg.chat.id,
+      '🚀 ST Signals Bot يعمل بنجاح'
+    );
+
+  }
+);
+
+bot.onText(
+  /\/test/,
+  async () => {
+
+    const signal =
+      generateFakeSignal('TSLA');
+
+    await sendSignal(signal);
+
+  }
+);
+
 scanMarket();
 
-// فحص السوق كل 5 دقائق
 setInterval(
   scanMarket,
   5 * 60 * 1000
 );
 
-// تحديث الصفقات كل دقيقة
 setInterval(
   updateSignals,
   60 * 1000
 );
 
-console.log('🚀 ST Signals Bot Started');
+console.log(
+  '🚀 ST Signals Bot Started'
+);
