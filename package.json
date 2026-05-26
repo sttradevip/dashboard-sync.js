@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "node-telegram-bot-api": "^0.66.0",
-    "sharp": "^0.33.5"
+    "sharp": "^0.33.5",
+    "@supabase/supabase-js": "^2.45.4"
   }
 }
