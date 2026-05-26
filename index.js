@@ -1813,6 +1813,27 @@ bot.onText(
 );
 
 bot.onText(
+  /\/id/,
+  async (msg) => {
+
+    await sendToSameTopic(
+      msg,
+`🆔 بياناتك:
+
+from.id:
+${msg.from?.id}
+
+chat.id:
+${msg.chat?.id}
+
+thread.id:
+${msg.message_thread_id || 'لا يوجد'}`
+    );
+
+  }
+);
+
+bot.onText(
   /\/pause/,
   async (msg) => {
 
