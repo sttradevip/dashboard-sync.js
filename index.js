@@ -1741,15 +1741,7 @@ async function scanForTrades() {
     return;
   }
 
-  const marketOpen =
-    await isMarketOpenNow();
-
-  if (!marketOpen) {
-    console.log(
-      '⛔ Market closed.'
-    );
-    return;
-  }
+  const marketOpen = true;
 
   for (const symbol of SYMBOLS) {
 
