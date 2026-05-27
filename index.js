@@ -29,7 +29,7 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
 
 const SYMBOLS = String(
   process.env.SIGNAL_SYMBOLS ||
-  'TSLA,NVDA,AMZN,SPY,QQQ,META,AAPL,AMD,COIN,PLTR,NFLX'
+  'TSLA,NVDA,SPY,QQQ'
 )
   .split(',')
   .map(x => x.trim().toUpperCase())
@@ -41,7 +41,7 @@ const blockedSymbols = new Set();
 
 let botPaused = false;
 
-const SCAN_INTERVAL_MS = 2 * 60 * 1000;
+const SCAN_INTERVAL_MS = 10 * 60 * 1000;
 const UPDATE_INTERVAL_MS = 30 * 1000;
 
 const MIN_CONTRACT_PRICE = 1.50;
