@@ -63,6 +63,11 @@ const MIN_STOP_LOSS_DOLLARS = 0.20;
 const UPDATE_STEP = 0.05;
 const NEAR_STOP_DISTANCE = 0.05;
 
+const MIN_TOTAL_SCORE = 80;
+const MIN_TECHNICAL_SCORE = 60;
+const MIN_CONTRACT_QUALITY_SCORE = 65;
+const MIN_SMART_FLOW_SCORE = 60;
+
 // =====================
 // Helpers
 // =====================
@@ -228,7 +233,6 @@ function getMidPrice(item) {
 
   return 0;
 }
-
 function distancePercent(
   strike,
   stockPrice
@@ -316,16 +320,114 @@ function tradeKey(symbol) {
   return String(symbol || '')
     .toUpperCase();
 }
+
 function alreadyHasActiveTrade(symbol) {
-  return activeTrades.has(tradeKey(symbol));
+  return activeTrades.has(
+    tradeKey(symbol)
+  );
+}
+
+async function saveTradeToSupabase(trade) {
+  try {
+    await supabase
+      .from('trade_updates')
+      .insert({
+        symbol: trade.symbol,
+        type: trade.type,
+        strike: Number(trade.strike),
+        expiration: trade.expiration,
+
+        entry_price: trade.entry,
+        current_price: trade.current,
+
+        target_price: trade.target,
+        stop_price: trade.stop,
+
+        status: trade.status || 'OPEN',
+        pnl_percent: Number(
+          pnlPercent(
+            trade.entry,
+            trade.current
+          )
+        )
+      });
+  } catch (err) {
+    console.error(
+      'Supabase Insert Error:',
+      err.message
+    );
+  }
+}
+
+async function updateTradeInSupabase(trade) {
+  try {
+    await supabase
+      .from('trade_updates')
+      .update({
+        current_price: trade.current,
+        status: trade.status || 'OPEN',
+        pnl_percent: Number(
+          pnlPercent(
+            trade.entry,
+            trade.current
+          )
+        ),
+        updated_at: new Date().toISOString()
+      })
+      .eq('symbol', trade.symbol)
+      .eq('type', trade.type)
+      .eq('strike', Number(trade.strike))
+      .eq('expiration', trade.expiration)
+      .eq('status', 'OPEN');
+  } catch (err) {
+    console.error(
+      'Supabase Update Error:',
+      err.message
+    );
+  }
+}
+
+async function closeTradeInSupabase(trade) {
+  try {
+    await supabase
+      .from('trade_updates')
+      .update({
+        current_price: trade.current,
+        status: trade.status,
+        pnl_percent: Number(
+          pnlPercent(
+            trade.entry,
+            trade.current
+          )
+        ),
+        updated_at: new Date().toISOString()
+      })
+      .eq('symbol', trade.symbol)
+      .eq('type', trade.type)
+      .eq('strike', Number(trade.strike))
+      .eq('expiration', trade.expiration)
+      .eq('status', 'OPEN');
+  } catch (err) {
+    console.error(
+      'Supabase Close Error:',
+      err.message
+    );
+  }
 }
 
 function markTradeActive(trade) {
-  activeTrades.set(tradeKey(trade.symbol), trade);
+  activeTrades.set(
+    tradeKey(trade.symbol),
+    trade
+  );
+
+  saveTradeToSupabase(trade);
 }
 
 function removeTrade(symbol) {
-  activeTrades.delete(tradeKey(symbol));
+  activeTrades.delete(
+    tradeKey(symbol)
+  );
 }
 
 function wasSentToday(trade) {
@@ -347,7 +449,9 @@ function tradeTitle(trade) {
 }
 
 function isETF(symbol) {
-  return ['SPY', 'QQQ'].includes(String(symbol).toUpperCase());
+  return ['SPY', 'QQQ'].includes(
+    String(symbol).toUpperCase()
+  );
 }
 
 function isAllowedSignalTime(symbol) {
@@ -367,7 +471,9 @@ function isAllowedSignalTime(symbol) {
   const stocksEnd = 23 * 60;
   const etfEnd = 24 * 60;
 
-  if (totalMinutes < start) return false;
+  if (totalMinutes < start) {
+    return false;
+  }
 
   if (isETF(symbol)) {
     return totalMinutes <= etfEnd;
@@ -382,7 +488,9 @@ function isAllowedSignalTime(symbol) {
 
 async function apiGet(url) {
   if (!API_KEY) {
-    throw new Error('Missing MASSIVE_API_KEY');
+    throw new Error(
+      'Missing MASSIVE_API_KEY'
+    );
   }
 
   const res = await fetch(url);
@@ -412,11 +520,13 @@ async function isMarketOpenNow() {
       data?.exchanges?.nyse === 'open'
     );
   } catch (err) {
-    console.error('Market Status Error:', err.message);
+    console.error(
+      'Market Status Error:',
+      err.message
+    );
     return false;
   }
 }
-
 async function getStockSnapshot(symbol) {
   const url =
     `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
@@ -441,6 +551,28 @@ async function getStockSnapshot(symbol) {
   };
 }
 
+async function getIntradayCandles(symbol) {
+  const to = new Date();
+  const from = new Date();
+
+  from.setDate(
+    from.getDate() - 3
+  );
+
+  const fromDate =
+    from.toISOString().slice(0, 10);
+
+  const toDate =
+    to.toISOString().slice(0, 10);
+
+  const url =
+    `https://api.massive.com/v2/aggs/ticker/${symbol}/range/5/minute/${fromDate}/${toDate}?adjusted=true&sort=asc&limit=5000&apiKey=${API_KEY}`;
+
+  const data = await apiGet(url);
+
+  return data.results || [];
+}
+
 async function getOptionsChain(symbol) {
   const url =
     `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
@@ -458,6 +590,7 @@ async function getOptionSnapshot(contractTicker) {
 
   return data.results || data;
 }
+
 // =====================
 // Image Card
 // =====================
@@ -534,6 +667,184 @@ async function createTradeImage(type) {
 }
 
 // =====================
+// Technical Engine
+// =====================
+
+function ema(values, length) {
+  if (!values.length) return null;
+
+  const k = 2 / (length + 1);
+
+  let emaValue = values[0];
+
+  for (let i = 1; i < values.length; i++) {
+    emaValue =
+      values[i] * k +
+      emaValue * (1 - k);
+  }
+
+  return emaValue;
+}
+
+function calculateVWAP(candles) {
+  let pv = 0;
+  let volume = 0;
+
+  for (const c of candles) {
+    const typical =
+      (Number(c.h) + Number(c.l) + Number(c.c)) / 3;
+
+    const v = Number(c.v || 0);
+
+    pv += typical * v;
+    volume += v;
+  }
+
+  if (!volume) return null;
+
+  return pv / volume;
+}
+
+function candleStrength(candle) {
+  if (!candle) return 0;
+
+  const open = Number(candle.o);
+  const close = Number(candle.c);
+  const high = Number(candle.h);
+  const low = Number(candle.l);
+
+  const range = high - low;
+
+  if (!range) return 0;
+
+  return Math.abs(close - open) / range;
+}
+
+async function getTechnicalBias(symbol) {
+  try {
+    const candles =
+      await getIntradayCandles(symbol);
+
+    if (!candles || candles.length < 30) {
+      return {
+        side: 'NEUTRAL',
+        score: 0,
+        reason: 'بيانات الشموع غير كافية'
+      };
+    }
+
+    const closes =
+      candles.map(c => Number(c.c));
+
+    const last =
+      candles[candles.length - 1];
+
+    const previous =
+      candles.slice(-21, -1);
+
+    const price = Number(last.c);
+
+    const ema9 =
+      ema(closes.slice(-30), 9);
+
+    const ema21 =
+      ema(closes.slice(-60), 21);
+
+    const vwap =
+      calculateVWAP(
+        candles.slice(-78)
+      );
+
+    const recentHigh = Math.max(
+      ...previous.map(c => Number(c.h))
+    );
+
+    const recentLow = Math.min(
+      ...previous.map(c => Number(c.l))
+    );
+
+    const strength =
+      candleStrength(last);
+
+    const volume =
+      Number(last.v || 0);
+
+    const avgVolume =
+      previous.reduce(
+        (sum, c) => sum + Number(c.v || 0),
+        0
+      ) / previous.length;
+
+    let callScore = 0;
+    let putScore = 0;
+
+    if (price > ema9) callScore += 15;
+    if (price < ema9) putScore += 15;
+
+    if (price > ema21) callScore += 20;
+    if (price < ema21) putScore += 20;
+
+    if (vwap && price > vwap) callScore += 20;
+    if (vwap && price < vwap) putScore += 20;
+
+    if (price > recentHigh) callScore += 20;
+    if (price < recentLow) putScore += 20;
+
+    if (volume > avgVolume * 1.2) {
+      callScore += 10;
+      putScore += 10;
+    }
+
+    if (strength >= 0.55) {
+      if (price > Number(last.o)) {
+        callScore += 15;
+      } else {
+        putScore += 15;
+      }
+    }
+
+    if (
+      callScore >= MIN_TECHNICAL_SCORE &&
+      callScore > putScore + 15
+    ) {
+      return {
+        side: 'CALL',
+        score: callScore,
+        reason: 'اتجاه فني صاعد'
+      };
+    }
+
+    if (
+      putScore >= MIN_TECHNICAL_SCORE &&
+      putScore > callScore + 15
+    ) {
+      return {
+        side: 'PUT',
+        score: putScore,
+        reason: 'اتجاه فني هابط'
+      };
+    }
+
+    return {
+      side: 'NEUTRAL',
+      score: Math.max(callScore, putScore),
+      reason: 'الاتجاه غير حاسم'
+    };
+
+  } catch (err) {
+    console.error(
+      `Technical Filter Error ${symbol}:`,
+      err.message
+    );
+
+    return {
+      side: 'NEUTRAL',
+      score: 0,
+      reason: 'تعذر حساب الفلتر الفني'
+    };
+  }
+}
+// =====================
 // Scoring Engine
 // =====================
 
@@ -569,15 +880,100 @@ function spreadPercent(item) {
   return ((ask - bid) / mid) * 100;
 }
 
+function contractQualityScore(item, stock) {
+  const volume = getVolume(item);
+  const oi = getOI(item);
+  const gamma = Number(getGamma(item) || 0);
+  const delta = Math.abs(Number(getDelta(item) || 0));
+  const mid = getMidPrice(item);
+  const dist = distancePercent(getStrike(item), stock.price);
+  const spread = spreadPercent(item);
+  const dte = daysToExpiration(getExpiration(item));
+  const iv = Number(getIV(item) || 0);
+
+  let score = 0;
+
+  if (mid >= MIN_CONTRACT_PRICE && mid <= MAX_CONTRACT_PRICE) score += 15;
+
+  if (delta >= 0.30 && delta <= 0.42) score += 20;
+  else if (delta >= MIN_DELTA && delta <= MAX_DELTA) score += 12;
+
+  if (gamma >= 0.08) score += 20;
+  else if (gamma >= 0.04) score += 15;
+  else if (gamma >= MIN_GAMMA) score += 8;
+
+  if (spread <= 6) score += 15;
+  else if (spread <= 10) score += 10;
+  else if (spread <= MAX_SPREAD_PERCENT) score += 5;
+
+  if (dist !== null) {
+    if (dist <= 0.75) score += 15;
+    else if (dist <= 1.5) score += 10;
+    else if (dist <= MAX_DISTANCE_PERCENT) score += 5;
+  }
+
+  if (volume >= 3000) score += 10;
+  else if (volume >= MIN_VOLUME) score += 6;
+
+  if (oi >= 2000) score += 5;
+  else if (oi >= 500) score += 3;
+
+  if (dte >= 0 && dte <= 3) score += 8;
+  else if (dte <= 7) score += 5;
+
+  if (iv > 0 && iv <= 1.2) score += 5;
+
+  return Math.min(score, 100);
+}
+
+function smartFlowScore(item, stock, flowBias = null) {
+  const type = getContractType(item);
+  const volume = getVolume(item);
+  const oi = getOI(item);
+  const gamma = Number(getGamma(item) || 0);
+  const delta = Math.abs(Number(getDelta(item) || 0));
+  const dist = distancePercent(getStrike(item), stock.price);
+  const spread = spreadPercent(item);
+
+  let score = 0;
+
+  if (volume > oi) score += 20;
+  if (volume > oi * 2) score += 20;
+  if (volume > oi * 4) score += 15;
+
+  if (volume >= 5000) score += 15;
+  else if (volume >= 2000) score += 10;
+  else if (volume >= MIN_VOLUME) score += 5;
+
+  if (gamma >= 0.08) score += 15;
+  else if (gamma >= 0.04) score += 10;
+
+  if (delta >= 0.30 && delta <= 0.45) score += 10;
+
+  if (dist !== null && dist <= 1.5) score += 10;
+
+  if (spread <= 10) score += 5;
+
+  if (
+    flowBias &&
+    flowBias.side === type &&
+    flowBias.side !== 'NEUTRAL'
+  ) {
+    score += flowBias.strength === 'STRONG'
+      ? 20
+      : 10;
+  }
+
+  return Math.min(score, 100);
+}
+
 function flowItemScore(item, stock) {
   const type = getContractType(item);
   const strike = getStrike(item);
   const volume = getVolume(item);
   const oi = getOI(item);
 
-  const gamma = Number(
-    getGamma(item) || 0
-  );
+  const gamma = Number(getGamma(item) || 0);
 
   const delta = Math.abs(
     Number(getDelta(item) || 0)
@@ -598,7 +994,7 @@ function flowItemScore(item, stock) {
     return 0;
   }
 
-  if (dist > 3) {
+  if (dist > MAX_DISTANCE_PERCENT) {
     return 0;
   }
 
@@ -609,30 +1005,15 @@ function flowItemScore(item, stock) {
   let score = 0;
 
   score += Math.min(volume / 100, 500);
-
   score += Math.min(oi / 150, 150);
 
-  if (volume > oi) {
-    score += 250;
-  }
+  if (volume > oi) score += 250;
+  if (volume > oi * 2) score += 200;
+  if (volume > oi * 4) score += 150;
 
-  if (volume > oi * 2) {
-    score += 200;
-  }
-
-  if (volume > oi * 4) {
-    score += 150;
-  }
-
-  if (gamma >= 0.08) {
-    score += 300;
-  }
-  else if (gamma >= 0.04) {
-    score += 220;
-  }
-  else if (gamma >= 0.02) {
-    score += 100;
-  }
+  if (gamma >= 0.08) score += 300;
+  else if (gamma >= 0.04) score += 220;
+  else if (gamma >= 0.02) score += 100;
 
   if (
     delta >= 0.25 &&
@@ -641,15 +1022,9 @@ function flowItemScore(item, stock) {
     score += 150;
   }
 
-  if (dist <= 0.5) {
-    score += 200;
-  }
-  else if (dist <= 1) {
-    score += 150;
-  }
-  else if (dist <= 2) {
-    score += 80;
-  }
+  if (dist <= 0.5) score += 200;
+  else if (dist <= 1) score += 150;
+  else if (dist <= 2) score += 80;
 
   return score;
 }
@@ -719,7 +1094,8 @@ function getFlowBias(chain, stock) {
 function isCandidateContract(
   item,
   stock,
-  flowBias = null
+  flowBias = null,
+  technicalBias = null
 ) {
 
   const type = getContractType(item);
@@ -764,6 +1140,28 @@ function isCandidateContract(
   }
 
   if (
+    technicalBias &&
+    technicalBias.side !== 'NEUTRAL' &&
+    type !== technicalBias.side
+  ) {
+    return false;
+  }
+
+  if (
+    technicalBias &&
+    technicalBias.side === 'NEUTRAL'
+  ) {
+    return false;
+  }
+
+  if (
+    technicalBias &&
+    technicalBias.score < MIN_TECHNICAL_SCORE
+  ) {
+    return false;
+  }
+
+  if (
     mid < MIN_CONTRACT_PRICE ||
     mid > MAX_CONTRACT_PRICE
   ) {
@@ -801,202 +1199,252 @@ function isCandidateContract(
     return false;
   }
 
-  if (
+  const quality =
+  contractQualityScore(item, stock);
+
+if (
+  quality <
+  MIN_CONTRACT_QUALITY_SCORE
+) {
+  return false;
+}
+
+const smartFlow =
+  smartFlowScore(
+    item,
+    stock,
+    flowBias
+  );
+
+if (
+  smartFlow <
+  MIN_SMART_FLOW_SCORE
+) {
+  return false;
+}
+
+if (
+  flowBias &&
+  flowBias.strength === 'STRONG' &&
+  flowBias.side !== 'NEUTRAL' &&
+  type !== flowBias.side
+) {
+  return false;
+}
+
+if (
+  momentum !== 'NEUTRAL' &&
+  type !== momentum
+) {
+
+  const flowSupportsContrarian =
     flowBias &&
-    flowBias.strength === 'STRONG' &&
-    flowBias.side !== 'NEUTRAL' &&
-    type !== flowBias.side
+    flowBias.side === type &&
+    flowBias.strength === 'STRONG';
+
+  const strongContrarian =
+    volume > getOI(item) * 4 &&
+    gamma >= 0.04 &&
+    dist <= 1 &&
+    technicalBias &&
+    technicalBias.side === type;
+
+  if (
+    !flowSupportsContrarian &&
+    !strongContrarian
   ) {
     return false;
   }
+}
 
-  if (
-    momentum !== 'NEUTRAL' &&
-    type !== momentum
-  ) {
-
-    const flowSupportsContrarian =
-      flowBias &&
-      flowBias.side === type &&
-      flowBias.strength === 'STRONG';
-
-    const strongContrarian =
-      volume > getOI(item) * 4 &&
-      gamma >= 0.04 &&
-      dist <= 1;
-
-    if (
-      !flowSupportsContrarian &&
-      !strongContrarian
-    ) {
-      return false;
-    }
-  }
-
-  return true;
+return true;
 }
 
 function contractScore(
-  item,
-  stock,
-  flowBias = null
+item,
+stock,
+flowBias = null,
+technicalBias = null
 ) {
 
-  const type = getContractType(item);
+const type = getContractType(item);
 
-  const volume = getVolume(item);
+const volume = getVolume(item);
 
-  const oi = getOI(item);
+const oi = getOI(item);
 
-  const gamma = Number(
-    getGamma(item) || 0
+const gamma = Number(
+  getGamma(item) || 0
+);
+
+const delta = Math.abs(
+  Number(getDelta(item) || 0)
+);
+
+const mid = getMidPrice(item);
+
+const dist = distancePercent(
+  getStrike(item),
+  stock.price
+);
+
+const spread =
+  spreadPercent(item);
+
+const dte =
+  daysToExpiration(
+    getExpiration(item)
   );
 
-  const delta = Math.abs(
-    Number(getDelta(item) || 0)
+const momentum =
+  stockMomentumSide(stock);
+
+const quality =
+  contractQualityScore(
+    item,
+    stock
   );
 
-  const mid = getMidPrice(item);
-
-  const dist = distancePercent(
-    getStrike(item),
-    stock.price
+const smartFlow =
+  smartFlowScore(
+    item,
+    stock,
+    flowBias
   );
 
-  const spread =
-    spreadPercent(item);
+let score = 0;
 
-  const dte =
-    daysToExpiration(
-      getExpiration(item)
-    );
+score += quality * 3;
+score += smartFlow * 3;
 
-  const momentum =
-    stockMomentumSide(stock);
-
-  let score = 0;
-
-  score += Math.min(
-    volume / 100,
-    500
-  );
-
-  score += Math.min(
-    oi / 100,
-    200
-  );
-
-  if (volume > oi) {
-    score += 300;
-  }
-
-  if (volume > oi * 2) {
-    score += 200;
-  }
-
-  if (volume > oi * 4) {
-    score += 200;
-  }
-
-  if (gamma >= 0.08) {
-    score += 350;
-  }
-  else if (gamma >= 0.04) {
-    score += 250;
-  }
-  else if (gamma >= 0.02) {
-    score += 120;
-  }
-
-  if (
-    delta >= 0.28 &&
-    delta <= 0.40
-  ) {
-    score += 250;
-  }
-  else if (
-    delta >= 0.25 &&
-    delta <= 0.45
-  ) {
-    score += 150;
-  }
-
-  if (dist !== null) {
-
-    if (dist <= 0.5) {
-      score += 300;
-    }
-    else if (dist <= 1) {
-      score += 220;
-    }
-    else if (dist <= 2) {
-      score += 120;
-    }
-  }
-
-  if (
-    mid >= 1.5 &&
-    mid <= 2.5
-  ) {
-    score += 250;
-  }
-
-  if (spread <= 6) {
-    score += 180;
-  }
-  else if (spread <= 10) {
-    score += 100;
-  }
-  else if (spread <= 15) {
-    score += 40;
-  }
-
-  if (dte <= 1) {
-    score += 150;
-  }
-  else if (dte <= 5) {
-    score += 100;
-  }
-  else if (dte <= 10) {
-    score += 50;
-  }
-
-  if (
-    momentum !== 'NEUTRAL' &&
-    type === momentum
-  ) {
-    score += 250;
-  }
-
-  if (
-    flowBias &&
-    flowBias.side === type &&
-    flowBias.side !== 'NEUTRAL'
-  ) {
-    score +=
-      flowBias.strength === 'STRONG'
-        ? 350
-        : 150;
-  }
-
-  if (
-    flowBias &&
-    flowBias.side !== 'NEUTRAL' &&
-    flowBias.side !== type
-  ) {
-    score -=
-      flowBias.strength === 'STRONG'
-        ? 500
-        : 200;
-  }
-
-  return Math.round(score);
+if (
+  technicalBias &&
+  technicalBias.side === type
+) {
+  score += technicalBias.score * 3;
 }
 
+score += Math.min(
+  volume / 100,
+  500
+);
+
+score += Math.min(
+  oi / 100,
+  200
+);
+
+if (volume > oi) {
+  score += 300;
+}
+
+if (volume > oi * 2) {
+  score += 200;
+}
+
+if (volume > oi * 4) {
+  score += 200;
+}
+
+if (gamma >= 0.08) {
+  score += 350;
+}
+else if (gamma >= 0.04) {
+  score += 250;
+}
+else if (gamma >= 0.02) {
+  score += 120;
+}
+
+if (
+  delta >= 0.28 &&
+  delta <= 0.40
+) {
+  score += 250;
+}
+else if (
+  delta >= 0.25 &&
+  delta <= 0.45
+) {
+  score += 150;
+}
+
+if (dist !== null) {
+
+  if (dist <= 0.5) {
+    score += 300;
+  }
+  else if (dist <= 1) {
+    score += 220;
+  }
+  else if (dist <= 2) {
+    score += 120;
+  }
+}
+
+if (
+  mid >= 1.5 &&
+  mid <= 2.5
+) {
+  score += 250;
+}
+
+if (spread <= 6) {
+  score += 180;
+}
+else if (spread <= 10) {
+  score += 100;
+}
+else if (spread <= 15) {
+  score += 40;
+}
+
+if (dte <= 1) {
+  score += 150;
+}
+else if (dte <= 5) {
+  score += 100;
+}
+else if (dte <= 10) {
+  score += 50;
+}
+
+if (
+  momentum !== 'NEUTRAL' &&
+  type === momentum
+) {
+  score += 250;
+}
+
+if (
+  flowBias &&
+  flowBias.side === type &&
+  flowBias.side !== 'NEUTRAL'
+) {
+  score +=
+    flowBias.strength === 'STRONG'
+      ? 350
+      : 150;
+}
+
+if (
+  flowBias &&
+  flowBias.side !== 'NEUTRAL' &&
+  flowBias.side !== type
+) {
+  score -=
+    flowBias.strength === 'STRONG'
+      ? 500
+      : 200;
+}
+
+return Math.round(score);
+}
 function selectBestContract(
   symbol,
   stock,
-  chain
+  chain,
+  technicalBias = null
 ) {
 
   const flowBias =
@@ -1007,7 +1455,8 @@ function selectBestContract(
       isCandidateContract(
         item,
         stock,
-        flowBias
+        flowBias,
+        technicalBias
       )
     )
     .map(item => ({
@@ -1015,7 +1464,8 @@ function selectBestContract(
       score: contractScore(
         item,
         stock,
-        flowBias
+        flowBias,
+        technicalBias
       )
     }))
     .sort(
@@ -1028,6 +1478,10 @@ function selectBestContract(
   }
 
   const best = candidates[0];
+
+  if (best.score < MIN_TOTAL_SCORE) {
+    return null;
+  }
 
   const item = best.item;
 
@@ -1102,10 +1556,32 @@ function selectBestContract(
 
     score: best.score,
 
+    technicalBias:
+      technicalBias?.side || 'NEUTRAL',
+
+    technicalScore:
+      technicalBias?.score || 0,
+
+    technicalReason:
+      technicalBias?.reason || 'غير متوفر',
+
     flowBias: flowBias.side,
 
     flowStrength:
       flowBias.strength,
+
+    contractQuality:
+      contractQualityScore(
+        item,
+        stock
+      ),
+
+    smartFlow:
+      smartFlowScore(
+        item,
+        stock,
+        flowBias
+           ),
 
     volume: getVolume(item),
 
@@ -1176,6 +1652,11 @@ IV: ${
     : 'غير متوفر'
 }
 
+📊 الاتجاه الفني: ${trade.technicalBias}
+🧠 سبب الفلترة: ${trade.technicalReason}
+⭐ جودة العقد: ${trade.contractQuality}
+🔥 تدفق ذكي: ${trade.smartFlow}
+
 ⭐ جودة الفلترة: ${trade.score}
 
 🔥 ST TRADE VIP`;
@@ -1200,6 +1681,10 @@ async function sendTradeUpdate(
       trade.entry,
       trade.current
     );
+
+  await updateTradeInSupabase(
+    trade
+  );
 
   const text =
 `🚀 تحديث الصفقة
@@ -1292,6 +1777,12 @@ $${fmtPrice(trade.stop)}`;
 
 async function sendStopHit(trade) {
 
+  trade.status = 'STOPPED';
+
+  await closeTradeInSupabase(
+    trade
+  );
+
   const percent =
     pnlPercent(
       trade.entry,
@@ -1330,6 +1821,12 @@ ${percent}%`;
 async function sendTargetHit(
   trade
 ) {
+
+  trade.status = 'TARGET';
+
+  await closeTradeInSupabase(
+    trade
+  );
 
   const percent =
     pnlPercent(
@@ -1404,30 +1901,16 @@ async function refreshTradePrice(trade) {
 
   let current = 0;
 
-  // Mid Price
   if (bid > 0 && ask > 0) {
-
-    current =
-      (bid + ask) / 2;
-
-  }
-
-  // Fallback
-  else if (last > 0) {
-
+    current = (bid + ask) / 2;
+  } else if (last > 0) {
     current = last;
-
   }
 
-  if (
-    !current ||
-    current <= 0
-  ) {
-
+  if (!current || current <= 0) {
     console.log(
       `⚠️ لم يتم تحديث سعر العقد: ${trade.contractTicker}`
     );
-
     return null;
   }
 
@@ -1435,128 +1918,60 @@ async function refreshTradePrice(trade) {
     `🔄 تحديث ${trade.symbol} ${trade.type} ${trade.strike}: ${trade.current} → ${current.toFixed(2)}`
   );
 
-  return Number(
-    current.toFixed(2)
-  );
+  return Number(current.toFixed(2));
 }
 
 async function updateActiveTrades() {
 
-  for (
-    const [symbol, trade]
-    of activeTrades.entries()
-  ) {
-
+  for (const [symbol, trade] of activeTrades.entries()) {
     try {
+      if (trade.status !== 'OPEN') continue;
 
-      if (
-        trade.status !== 'OPEN'
-      ) {
-        continue;
-      }
-
-      const current =
-        await refreshTradePrice(
-          trade
-        );
-
-      if (!current) {
-        continue;
-      }
+      const current = await refreshTradePrice(trade);
+      if (!current) continue;
 
       trade.current = current;
 
-      // =====================
-      // STOP LOSS
-      // =====================
+      await updateTradeInSupabase(trade);
 
-      if (
-        trade.current <=
-        trade.stop
-      ) {
-
-        trade.status =
-          'STOPPED';
-
-        await sendStopHit(
-          trade
-        );
-
+      if (trade.current <= trade.stop) {
+        await sendStopHit(trade);
         removeTrade(symbol);
-
         continue;
       }
-
-      // =====================
-      // WARNING
-      // =====================
 
       if (
         !trade.warnedStop &&
-        trade.current <=
-          trade.stop +
-            NEAR_STOP_DISTANCE &&
-        trade.current >
-          trade.stop
+        trade.current <= trade.stop + NEAR_STOP_DISTANCE &&
+        trade.current > trade.stop
       ) {
-
-        trade.warnedStop =
-          true;
-
-        await sendNearStopWarning(
-          trade
-        );
+        trade.warnedStop = true;
+        await sendNearStopWarning(trade);
       }
 
-      // =====================
-      // TARGET
-      // =====================
-
-      if (
-        trade.current >=
-        trade.target
-      ) {
-
-        trade.status =
-          'TARGET';
-
-        await sendTargetHit(
-          trade
-        );
-
+      if (trade.current >= trade.target) {
+        await sendTargetHit(trade);
         removeTrade(symbol);
-
         continue;
       }
 
-      // =====================
-      // UPDATES
-      // =====================
-
       if (
         trade.current >=
-        trade.lastUpdatePrice +
-          UPDATE_STEP
+        trade.lastUpdatePrice + UPDATE_STEP
       ) {
-
-        await sendTradeUpdate(
-          trade
-        );
-
-        trade.lastUpdatePrice =
-          trade.current;
+        await sendTradeUpdate(trade);
+        trade.lastUpdatePrice = trade.current;
       }
 
     } catch (err) {
-
       console.error(
         `Update Error ${symbol}:`,
         err.message
       );
-
     }
   }
 }
+
 // =====================
 // Scanner
 // =====================
@@ -1644,6 +2059,20 @@ async function scanSingleSymbol(
     };
   }
 
+  const technicalBias =
+    await getTechnicalBias(symbol);
+
+  if (
+    !technicalBias ||
+    technicalBias.side === 'NEUTRAL'
+  ) {
+    return {
+      ok: false,
+      message:
+        `⚠️ ${symbol}: لا يوجد اتجاه فني واضح.`
+    };
+  }
+
   const chain =
     await getOptionsChain(
       symbol
@@ -1661,7 +2090,8 @@ async function scanSingleSymbol(
     selectBestContract(
       symbol,
       stock,
-      chain
+      chain,
+      technicalBias
     );
 
   if (!trade) {
@@ -1707,7 +2137,15 @@ async function scanForTrades() {
     return;
   }
 
-  const marketOpen = true;
+  const marketOpen =
+    await isMarketOpenNow();
+
+  if (!marketOpen) {
+    console.log(
+      '⛔ Market closed.'
+    );
+    return;
+  }
 
   for (const symbol of SYMBOLS) {
 
