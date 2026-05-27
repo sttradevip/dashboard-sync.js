@@ -207,9 +207,7 @@ function distancePercent(strike, stockPrice) {
 }
 
 function daysToExpiration(dateStr) {
-  if (!dateStr) {
-    return 999;
-  }
+  if (!dateStr) return 999;
 
   const now = new Date();
   const exp = new Date(dateStr + 'T23:59:59Z');
@@ -326,9 +324,11 @@ async function saveTradeToSupabase(trade) {
         stop_price: trade.stop,
 
         status: trade.status || 'OPEN',
-        pnl_percent: Number(
-          pnlPercent(trade.entry, trade.current)
-        )
+        pnl_percent: Number(pnlPercent(trade.entry, trade.current)),
+
+        profit_10_sent: !!trade.profit10Sent,
+        profit_20_sent: !!trade.profit20Sent,
+        profit_30_sent: !!trade.profit30Sent
       });
 
     if (error) {
@@ -346,11 +346,15 @@ async function updateTradeInSupabase(trade) {
       .update({
         current_price: trade.current,
         status: trade.status || 'OPEN',
-        pnl_percent: Number(
-          pnlPercent(trade.entry, trade.current)
-        ),
+        pnl_percent: Number(pnlPercent(trade.entry, trade.current)),
+
         message_id: trade.messageId || null,
         contract_ticker: trade.contractTicker || null,
+
+        profit_10_sent: !!trade.profit10Sent,
+        profit_20_sent: !!trade.profit20Sent,
+        profit_30_sent: !!trade.profit30Sent,
+
         updated_at: new Date().toISOString()
       })
       .eq('symbol', trade.symbol)
@@ -374,11 +378,15 @@ async function closeTradeInSupabase(trade) {
       .update({
         current_price: trade.current,
         status: trade.status,
-        pnl_percent: Number(
-          pnlPercent(trade.entry, trade.current)
-        ),
+        pnl_percent: Number(pnlPercent(trade.entry, trade.current)),
+
         message_id: trade.messageId || null,
         contract_ticker: trade.contractTicker || null,
+
+        profit_10_sent: !!trade.profit10Sent,
+        profit_20_sent: !!trade.profit20Sent,
+        profit_30_sent: !!trade.profit30Sent,
+
         updated_at: new Date().toISOString()
       })
       .eq('symbol', trade.symbol)
@@ -414,9 +422,7 @@ async function loadOpenTradesFromSupabase() {
 
     for (const row of data || []) {
       if (!row.contract_ticker) {
-        console.log(
-          `⚠️ صفقة مفتوحة بدون contract_ticker: ${row.symbol}`
-        );
+        console.log(`⚠️ صفقة مفتوحة بدون contract_ticker: ${row.symbol}`);
         continue;
       }
 
@@ -437,7 +443,11 @@ async function loadOpenTradesFromSupabase() {
 
         status: 'OPEN',
         lastUpdatePrice: Number(row.current_price),
+
         warnedStop: false,
+        profit10Sent: !!row.profit_10_sent,
+        profit20Sent: !!row.profit_20_sent,
+        profit30Sent: !!row.profit_30_sent,
 
         volume: 0,
         oi: 0,
@@ -518,9 +528,7 @@ async function getStockSnapshot(symbol) {
 
   if (!r) return null;
 
-  const change = r.o
-    ? ((r.c - r.o) / r.o) * 100
-    : null;
+  const change = r.o ? ((r.c - r.o) / r.o) * 100 : null;
 
   return {
     symbol,
@@ -597,41 +605,14 @@ async function createTradeImage(type) {
       stroke-width="8"
     />
 
-    <circle
-      cx="400"
-      cy="225"
-      r="115"
-      fill="${color}"
-      opacity="0.16"
-    />
+    <circle cx="400" cy="225" r="115" fill="${color}" opacity="0.16" />
+    <circle cx="400" cy="225" r="70" fill="${color}" opacity="0.22" />
 
-    <circle
-      cx="400"
-      cy="225"
-      r="70"
-      fill="${color}"
-      opacity="0.22"
-    />
+    <line x1="160" y1="225" x2="640" y2="225"
+      stroke="${color}" stroke-width="4" opacity="0.35" />
 
-    <line
-      x1="160"
-      y1="225"
-      x2="640"
-      y2="225"
-      stroke="${color}"
-      stroke-width="4"
-      opacity="0.35"
-    />
-
-    <line
-      x1="400"
-      y1="80"
-      x2="400"
-      y2="370"
-      stroke="${color}"
-      stroke-width="4"
-      opacity="0.18"
-    />
+    <line x1="400" y1="80" x2="400" y2="370"
+      stroke="${color}" stroke-width="4" opacity="0.18" />
   </svg>
   `;
 
@@ -711,25 +692,17 @@ async function getTechnicalBias(symbol) {
 
     const ema9 = ema(closes.slice(-30), 9);
     const ema21 = ema(closes.slice(-60), 21);
-
     const vwap = calculateVWAP(candles.slice(-78));
 
-    const recentHigh = Math.max(
-      ...previous.map(c => Number(c.h))
-    );
-
-    const recentLow = Math.min(
-      ...previous.map(c => Number(c.l))
-    );
+    const recentHigh = Math.max(...previous.map(c => Number(c.h)));
+    const recentLow = Math.min(...previous.map(c => Number(c.l)));
 
     const strength = candleStrength(last);
     const volume = Number(last.v || 0);
 
     const avgVolume =
-      previous.reduce(
-        (sum, c) => sum + Number(c.v || 0),
-        0
-      ) / previous.length;
+      previous.reduce((sum, c) => sum + Number(c.v || 0), 0) /
+      previous.length;
 
     let callScore = 0;
     let putScore = 0;
@@ -788,10 +761,7 @@ async function getTechnicalBias(symbol) {
     };
 
   } catch (err) {
-    console.error(
-      `Technical Filter Error ${symbol}:`,
-      err.message
-    );
+    console.error(`Technical Filter Error ${symbol}:`, err.message);
 
     return {
       side: 'NEUTRAL',
@@ -825,9 +795,7 @@ function spreadPercent(item) {
   const ask = getAsk(item);
   const mid = getMidPrice(item);
 
-  if (!bid || !ask || !mid) {
-    return 999;
-  }
+  if (!bid || !ask || !mid) return 999;
 
   return ((ask - bid) / mid) * 100;
 }
@@ -944,9 +912,7 @@ function flowItemScore(item, stock) {
   else if (gamma >= 0.04) score += 220;
   else if (gamma >= 0.02) score += 100;
 
-  if (delta >= 0.25 && delta <= 0.45) {
-    score += 150;
-  }
+  if (delta >= 0.25 && delta <= 0.45) score += 150;
 
   if (dist <= 0.5) score += 200;
   else if (dist <= 1) score += 150;
@@ -1039,12 +1005,7 @@ function isCandidateContract(
     return false;
   }
 
-  if (
-    technicalBias &&
-    technicalBias.side === 'NEUTRAL'
-  ) {
-    return false;
-  }
+  if (technicalBias && technicalBias.side === 'NEUTRAL') return false;
 
   if (
     technicalBias &&
@@ -1053,10 +1014,7 @@ function isCandidateContract(
     return false;
   }
 
-  if (mid < MIN_CONTRACT_PRICE || mid > MAX_CONTRACT_PRICE) {
-    return false;
-  }
-
+  if (mid < MIN_CONTRACT_PRICE || mid > MAX_CONTRACT_PRICE) return false;
   if (volume < MIN_VOLUME) return false;
   if (delta < MIN_DELTA || delta > MAX_DELTA) return false;
   if (gamma < MIN_GAMMA) return false;
@@ -1065,16 +1023,10 @@ function isCandidateContract(
   if (dte < 0 || dte > 10) return false;
 
   const quality = contractQualityScore(item, stock);
-
-  if (quality < MIN_CONTRACT_QUALITY_SCORE) {
-    return false;
-  }
+  if (quality < MIN_CONTRACT_QUALITY_SCORE) return false;
 
   const smartFlow = smartFlowScore(item, stock, flowBias);
-
-  if (smartFlow < MIN_SMART_FLOW_SCORE) {
-    return false;
-  }
+  if (smartFlow < MIN_SMART_FLOW_SCORE) return false;
 
   if (
     flowBias &&
@@ -1098,9 +1050,7 @@ function isCandidateContract(
       technicalBias &&
       technicalBias.side === type;
 
-    if (!flowSupportsContrarian && !strongContrarian) {
-      return false;
-    }
+    if (!flowSupportsContrarian && !strongContrarian) return false;
   }
 
   return true;
@@ -1165,9 +1115,7 @@ function contractScore(
   else if (dte <= 5) score += 100;
   else if (dte <= 10) score += 50;
 
-  if (momentum !== 'NEUTRAL' && type === momentum) {
-    score += 250;
-  }
+  if (momentum !== 'NEUTRAL' && type === momentum) score += 250;
 
   if (
     flowBias &&
@@ -1219,7 +1167,6 @@ function selectBestContract(
   if (!candidates.length) return null;
 
   const best = candidates[0];
-
   if (best.score < MIN_TOTAL_SCORE) return null;
 
   const item = best.item;
@@ -1287,6 +1234,11 @@ function selectBestContract(
     dte: daysToExpiration(expiration),
 
     warnedStop: false,
+
+    profit10Sent: false,
+    profit20Sent: false,
+    profit30Sent: false,
+
     messageId: null,
     status: 'OPEN'
   };
@@ -1373,11 +1325,15 @@ async function sendTradeEntry(trade) {
   );
 
   trade.messageId = sent.message_id;
+
+  console.log('💾 messageId saved:', trade.messageId);
+
   return sent;
 }
 
 async function editTradeCaption(trade) {
   if (!trade.messageId) {
+    console.log('❌ لا يوجد messageId لتعديل رسالة الصفقة');
     return false;
   }
 
@@ -1386,7 +1342,7 @@ async function editTradeCaption(trade) {
       buildTradeCaption(trade, 'update'),
       {
         chat_id: CHAT_ID,
-        message_id: trade.messageId
+        message_id: Number(trade.messageId)
       }
     );
 
@@ -1394,7 +1350,7 @@ async function editTradeCaption(trade) {
   } catch (err) {
     console.error(
       `Edit Caption Error ${trade.symbol}:`,
-      err.message
+      err.response?.body || err.message
     );
 
     return false;
@@ -1406,9 +1362,7 @@ async function sendTradeUpdate(trade) {
 
   const edited = await editTradeCaption(trade);
 
-  if (edited) {
-    return;
-  }
+  if (edited) return;
 
   const percent = pnlPercent(trade.entry, trade.current);
 
@@ -1430,6 +1384,53 @@ $${fmtPrice(trade.current)}
 
 📈 الربح الحالي:
 ${percent}%
+
+━━━━━━━━━━━━━━
+
+🎯 الهدف:
+$${fmtPrice(trade.target)}
+
+🛑 الوقف:
+$${fmtPrice(trade.stop)}
+
+🔥 ST TRADE VIP`;
+
+  await bot.sendMessage(
+    CHAT_ID,
+    text,
+    {
+      message_thread_id: THREAD_ID
+    }
+  );
+}
+
+async function sendProfitUpdate(trade, level) {
+  const percent = pnlPercent(trade.entry, trade.current);
+
+  await updateTradeInSupabase(trade);
+  await editTradeCaption(trade);
+
+  const text =
+`🚀 تحديث ربح الصفقة
+
+📊 ${tradeTitle(trade)}
+
+📅 الانتهاء:
+${trade.expiration}
+
+━━━━━━━━━━━━━━
+
+💰 الدخول:
+$${fmtPrice(trade.entry)}
+
+💵 الحالي:
+$${fmtPrice(trade.current)}
+
+📈 الربح الحالي:
+${percent}%
+
+🎯 وصل الربح:
++${level}%
 
 ━━━━━━━━━━━━━━
 
@@ -1576,9 +1577,7 @@ async function refreshTradePrice(trade) {
     trade.contractTicker
   );
 
-  if (!snapshot) {
-    return null;
-  }
+  if (!snapshot) return null;
 
   const data =
     snapshot?.results ||
@@ -1603,9 +1602,7 @@ async function refreshTradePrice(trade) {
   }
 
   if (!current || current <= 0) {
-    console.log(
-      `⚠️ لم يتم تحديث سعر العقد: ${trade.contractTicker}`
-    );
+    console.log(`⚠️ لم يتم تحديث سعر العقد: ${trade.contractTicker}`);
     return null;
   }
 
@@ -1628,6 +1625,23 @@ async function updateActiveTrades() {
       if (!current) continue;
 
       trade.current = current;
+
+      const profitNow = Number(pnlPercent(trade.entry, trade.current));
+
+      if (profitNow >= 10 && !trade.profit10Sent) {
+        trade.profit10Sent = true;
+        await sendProfitUpdate(trade, 10);
+      }
+
+      if (profitNow >= 20 && !trade.profit20Sent) {
+        trade.profit20Sent = true;
+        await sendProfitUpdate(trade, 20);
+      }
+
+      if (profitNow >= 30 && !trade.profit30Sent) {
+        trade.profit30Sent = true;
+        await sendProfitUpdate(trade, 30);
+      }
 
       await updateTradeInSupabase(trade);
 
@@ -1660,10 +1674,7 @@ async function updateActiveTrades() {
       }
 
     } catch (err) {
-      console.error(
-        `Update Error ${symbol}:`,
-        err.message
-      );
+      console.error(`Update Error ${symbol}:`, err.message);
     }
   }
 }
@@ -1805,10 +1816,7 @@ async function scanForTrades() {
       }
 
     } catch (err) {
-      console.error(
-        `Scan Error ${symbol}:`,
-        err.message
-      );
+      console.error(`Scan Error ${symbol}:`, err.message);
     }
   }
 }
