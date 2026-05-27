@@ -29,7 +29,7 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
 
 const SYMBOLS = String(
   process.env.SIGNAL_SYMBOLS ||
-  'TSLA,NVDA,SPY,QQQ'
+  'NVDA,SPY,QQQ'
 )
   .split(',')
   .map(x => x.trim().toUpperCase())
