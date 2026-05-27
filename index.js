@@ -40,7 +40,7 @@ const blockedSymbols = new Set();
 
 let botPaused = false;
 
-const SCAN_INTERVAL_MS = 10 * 60 * 1000;
+const SCAN_INTERVAL_MS = 25 * 60 * 1000;
 const UPDATE_INTERVAL_MS = 30 * 1000;
 
 const MIN_CONTRACT_PRICE = 1.50;
