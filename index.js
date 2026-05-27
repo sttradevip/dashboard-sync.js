@@ -41,12 +41,14 @@ const blockedSymbols = new Set();
 let botPaused = false;
 let scanIndex = 0;
 
-// فحص سهم واحد كل 3 دقائق لتخفيف الضغط على Massive
 const SCAN_INTERVAL_MS = 3 * 60 * 1000;
 const UPDATE_INTERVAL_MS = 30 * 1000;
-
-// إعادة تحليل بيانات العقد كل دقيقتين حتى لا تبقى LOADED
 const ANALYSIS_REFRESH_MS = 2 * 60 * 1000;
+
+// وقف فني فقط
+const TECHNICAL_STOP_CHECK_MS = 2 * 60 * 1000;
+const STOP_BREAK_BUFFER_PERCENT = 0.10;
+const STOP_LOOKBACK_BARS = 12;
 
 const MIN_CONTRACT_PRICE = 1.50;
 const MAX_CONTRACT_PRICE = 2.50;
@@ -473,7 +475,9 @@ async function loadOpenTradesFromSupabase() {
         flowStrength: 'LOADED',
         dte: daysToExpiration(row.expiration),
 
-        lastAnalysisAt: 0
+        lastAnalysisAt: 0,
+        lastTechStopCheckAt: 0,
+        technicalStopReason: null
       };
 
       activeTrades.set(tradeKey(trade.symbol), trade);
@@ -1248,7 +1252,9 @@ function selectBestContract(
 
     messageId: null,
     status: 'OPEN',
-    lastAnalysisAt: Date.now()
+    lastAnalysisAt: Date.now(),
+    lastTechStopCheckAt: 0,
+    technicalStopReason: null
   };
 }
 // =====================
@@ -1262,7 +1268,7 @@ function buildTradeCaption(trade, mode = 'entry') {
     trade.status === 'TARGET'
       ? '🎯 الحالة: تم تحقيق الهدف'
       : trade.status === 'STOPPED'
-        ? '❌ الحالة: تم ضرب الوقف'
+        ? '❌ الحالة: تم الخروج بوقف فني'
         : '🟢 الحالة: الصفقة مفتوحة';
 
   const title =
@@ -1284,7 +1290,7 @@ ${statusLine}
 📈 الربح/الخسارة: ${percent}%
 
 🎯 الهدف: $${fmtPrice(trade.target)}
-🛑 الوقف: $${fmtPrice(trade.stop)}
+🛑 الوقف: وقف فني فقط
 
 💵 Bid: $${fmtPrice(trade.bid)}
 💵 Ask: $${fmtPrice(trade.ask)}
@@ -1399,7 +1405,7 @@ ${percent}%
 $${fmtPrice(trade.target)}
 
 🛑 الوقف:
-$${fmtPrice(trade.stop)}
+وقف فني فقط
 
 🔥 ST TRADE VIP`;
 
@@ -1446,51 +1452,9 @@ ${percent}%
 $${fmtPrice(trade.target)}
 
 🛑 الوقف:
-$${fmtPrice(trade.stop)}
+وقف فني فقط
 
 🔥 ST TRADE VIP`;
-
-  await bot.sendMessage(
-    CHAT_ID,
-    text,
-    {
-      message_thread_id: THREAD_ID
-    }
-  );
-}
-
-// =====================
-// Trade Alerts
-// =====================
-
-async function sendNearStopWarning(trade) {
-  const percent = pnlPercent(trade.entry, trade.current);
-
-  const text =
-`⚠️ تنبيه مهم
-
-الصفقة قريبة من وقف الخسارة
-
-📊 ${tradeTitle(trade)}
-
-📅 الانتهاء:
-${trade.expiration}
-
-━━━━━━━━━━━━━━
-
-💰 الدخول:
-$${fmtPrice(trade.entry)}
-
-💵 الحالي:
-$${fmtPrice(trade.current)}
-
-📉 الخسارة الحالية:
-${percent}%
-
-━━━━━━━━━━━━━━
-
-🛑 الوقف:
-$${fmtPrice(trade.stop)}`;
 
   await bot.sendMessage(
     CHAT_ID,
@@ -1509,8 +1473,12 @@ async function sendStopHit(trade) {
 
   const percent = pnlPercent(trade.entry, trade.current);
 
+  const reason =
+    trade.technicalStopReason ||
+    'تحقق وقف فني';
+
   const text =
-`❌ تم ضرب وقف الخسارة
+`❌ تم الخروج بوقف فني
 
 📊 ${tradeTitle(trade)}
 
@@ -1525,8 +1493,13 @@ $${fmtPrice(trade.entry)}
 💵 الإغلاق:
 $${fmtPrice(trade.current)}
 
-📉 الخسارة النهائية:
-${percent}%`;
+📉 النتيجة:
+${percent}%
+
+━━━━━━━━━━━━━━
+
+🧠 سبب الخروج:
+${reason}`;
 
   await bot.sendMessage(
     CHAT_ID,
@@ -1574,7 +1547,6 @@ ${percent}%
     }
   );
 }
-
 // =====================
 // Trade Updates
 // =====================
@@ -1689,6 +1661,111 @@ async function enrichTradeAnalysis(trade, snapshotItem) {
   }
 }
 
+function getRecentSupportResistance(candles) {
+  const recent = candles.slice(
+    -STOP_LOOKBACK_BARS - 2,
+    -2
+  );
+
+  if (!recent.length) {
+    return {
+      support: null,
+      resistance: null
+    };
+  }
+
+  return {
+    support: Math.min(...recent.map(c => Number(c.l))),
+    resistance: Math.max(...recent.map(c => Number(c.h)))
+  };
+}
+
+async function shouldTechnicalStop(trade) {
+  const now = Date.now();
+
+  if (
+    trade.lastTechStopCheckAt &&
+    now - trade.lastTechStopCheckAt < TECHNICAL_STOP_CHECK_MS
+  ) {
+    return false;
+  }
+
+  trade.lastTechStopCheckAt = now;
+
+  const candles = await getIntradayCandles(trade.symbol);
+
+  if (!candles || candles.length < 40) {
+    return false;
+  }
+
+  const closes = candles.map(c => Number(c.c));
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+
+  const lastClose = Number(last.c);
+  const prevClose = Number(prev.c);
+
+  const ema9 = ema(closes.slice(-30), 9);
+  const vwap = calculateVWAP(candles.slice(-78));
+
+  const { support, resistance } =
+    getRecentSupportResistance(candles);
+
+  if (!ema9 || !vwap) {
+    return false;
+  }
+
+  const supportBreak =
+    support &&
+    lastClose < support * (1 - STOP_BREAK_BUFFER_PERCENT / 100);
+
+  const resistanceBreak =
+    resistance &&
+    lastClose > resistance * (1 + STOP_BREAK_BUFFER_PERCENT / 100);
+
+  if (trade.type === 'CALL') {
+    const twoClosesBelowVWAP =
+      lastClose < vwap &&
+      prevClose < vwap;
+
+    const belowEMA9 =
+      lastClose < ema9;
+
+    if (
+      twoClosesBelowVWAP &&
+      belowEMA9 &&
+      supportBreak
+    ) {
+      trade.technicalStopReason =
+        `إغلاق شمعتين تحت VWAP + السعر تحت EMA9 + كسر دعم ${fmtPrice(support)}`;
+
+      return true;
+    }
+  }
+
+  if (trade.type === 'PUT') {
+    const twoClosesAboveVWAP =
+      lastClose > vwap &&
+      prevClose > vwap;
+
+    const aboveEMA9 =
+      lastClose > ema9;
+
+    if (
+      twoClosesAboveVWAP &&
+      aboveEMA9 &&
+      resistanceBreak
+    ) {
+      trade.technicalStopReason =
+        `إغلاق شمعتين فوق VWAP + السعر فوق EMA9 + اختراق مقاومة ${fmtPrice(resistance)}`;
+
+      return true;
+    }
+  }
+
+  return false;
+}
+
 async function refreshTradeData(trade) {
   const snapshot = await getOptionSnapshot(
     trade.symbol,
@@ -1731,6 +1808,7 @@ async function refreshTradeData(trade) {
 
   return Number(current.toFixed(2));
 }
+
 async function updateActiveTrades() {
   for (const [symbol, trade] of activeTrades.entries()) {
     try {
@@ -1760,19 +1838,12 @@ async function updateActiveTrades() {
 
       await updateTradeInSupabase(trade);
 
-      if (trade.current <= trade.stop) {
+      const technicalStop = await shouldTechnicalStop(trade);
+
+      if (technicalStop) {
         await sendStopHit(trade);
         removeTrade(symbol);
         continue;
-      }
-
-      if (
-        !trade.warnedStop &&
-        trade.current <= trade.stop + NEAR_STOP_DISTANCE &&
-        trade.current > trade.stop
-      ) {
-        trade.warnedStop = true;
-        await sendNearStopWarning(trade);
       }
 
       if (trade.current >= trade.target) {
@@ -2124,6 +2195,8 @@ bot.onText(/\/stoptrade\s+([A-Za-z]{1,10})/, async (msg, match) => {
   const trade = activeTrades.get(symbol);
 
   trade.status = 'STOPPED';
+  trade.technicalStopReason = 'تم إغلاق الصفقة يدويًا من المالك';
+
   await closeTradeInSupabase(trade);
 
   removeTrade(symbol);
