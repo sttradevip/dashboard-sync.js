@@ -42,6 +42,8 @@ let botPaused = false;
 let scanIndex = 0;
 
 const SCAN_INTERVAL_MS = 3 * 60 * 1000;
+const SYMBOLS_PER_SCAN = 3;
+
 const UPDATE_INTERVAL_MS = 30 * 1000;
 const ANALYSIS_REFRESH_MS = 2 * 60 * 1000;
 
@@ -1864,7 +1866,6 @@ async function updateActiveTrades() {
     }
   }
 }
-
 // =====================
 // Scanner
 // =====================
@@ -1995,33 +1996,40 @@ async function scanForTrades() {
     return;
   }
 
-  const symbol = SYMBOLS[scanIndex % SYMBOLS.length];
-  scanIndex++;
+  const symbolsToScan = [];
 
-  try {
-    console.log(`🔎 Auto scan symbol: ${symbol}`);
+  for (let i = 0; i < SYMBOLS_PER_SCAN; i++) {
+    const symbol = SYMBOLS[scanIndex % SYMBOLS.length];
+    scanIndex++;
+    symbolsToScan.push(symbol);
+  }
 
-    if (blockedSymbols.has(symbol)) {
-      console.log(`⛔ ${symbol} blocked.`);
-      return;
+  console.log(`🔎 Auto scan symbols: ${symbolsToScan.join(', ')}`);
+
+  for (const symbol of symbolsToScan) {
+    try {
+      if (blockedSymbols.has(symbol)) {
+        console.log(`⛔ ${symbol} blocked.`);
+        continue;
+      }
+
+      if (!isAllowedSignalTime(symbol)) {
+        console.log(`⛔ ${symbol} outside signal time.`);
+        continue;
+      }
+
+      if (alreadyHasActiveTrade(symbol)) {
+        console.log(`⚠️ ${symbol} already has active trade.`);
+        continue;
+      }
+
+      const result = await scanSingleSymbol(symbol, false);
+
+      console.log(`${symbol}: ${result.message}`);
+
+    } catch (err) {
+      console.error(`Scan Error ${symbol}:`, err.message);
     }
-
-    if (!isAllowedSignalTime(symbol)) {
-      console.log(`⛔ ${symbol} outside signal time.`);
-      return;
-    }
-
-    if (alreadyHasActiveTrade(symbol)) {
-      console.log(`⚠️ ${symbol} already has active trade.`);
-      return;
-    }
-
-    const result = await scanSingleSymbol(symbol, false);
-
-    console.log(`${symbol}: ${result.message}`);
-
-  } catch (err) {
-    console.error(`Scan Error ${symbol}:`, err.message);
   }
 }
 
@@ -2085,10 +2093,13 @@ bot.onText(/\/botstatus/, async (msg) => {
       )
       .join('\n');
 
-  const nextSymbol =
-    SYMBOLS.length
-      ? SYMBOLS[scanIndex % SYMBOLS.length]
-      : 'غير متوفر';
+  const nextSymbols = [];
+
+  for (let i = 0; i < SYMBOLS_PER_SCAN; i++) {
+    if (SYMBOLS.length) {
+      nextSymbols.push(SYMBOLS[(scanIndex + i) % SYMBOLS.length]);
+    }
+  }
 
   await sendToSameTopic(
     msg,
@@ -2098,10 +2109,10 @@ bot.onText(/\/botstatus/, async (msg) => {
 ${botPaused ? '⏸ متوقف' : '▶️ يعمل'}
 
 نظام الفحص:
-سهم واحد كل دورة
+${SYMBOLS_PER_SCAN} أسهم كل دورة
 
-السهم القادم للفحص:
-${nextSymbol}
+الأسهم القادمة للفحص:
+${nextSymbols.length ? nextSymbols.join(', ') : 'غير متوفر'}
 
 قائمة الأسهم:
 ${SYMBOLS.join(', ')}
@@ -2210,14 +2221,17 @@ bot.onText(/\/stoptrade\s+([A-Za-z]{1,10})/, async (msg, match) => {
 bot.onText(/\/scan/, async (msg) => {
   if (!isAdmin(msg)) return;
 
-  const nextSymbol =
-    SYMBOLS.length
-      ? SYMBOLS[scanIndex % SYMBOLS.length]
-      : 'غير متوفر';
+  const nextSymbols = [];
+
+  for (let i = 0; i < SYMBOLS_PER_SCAN; i++) {
+    if (SYMBOLS.length) {
+      nextSymbols.push(SYMBOLS[(scanIndex + i) % SYMBOLS.length]);
+    }
+  }
 
   await sendToSameTopic(
     msg,
-    `🔎 جاري فحص السهم التالي: ${nextSymbol}`
+    `🔎 جاري فحص ${SYMBOLS_PER_SCAN} أسهم: ${nextSymbols.join(', ')}`
   );
 
   await scanForTrades();
