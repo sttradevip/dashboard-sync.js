@@ -1449,10 +1449,8 @@ async function sendTradeUpdate(trade) {
 
   const edited = await editTradeCaption(trade);
 
-  if (edited) return;
-
   const percent = pnlPercent(trade.entry, trade.current);
-
+  
   const target2Line =
     trade.stockTarget2
       ? `🎯 الهدف الثاني الفني على السهم:\n${fmtPrice(trade.stockTarget2)}`
