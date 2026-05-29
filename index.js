@@ -1161,7 +1161,7 @@ function isCandidateContract(
   if (gamma < MIN_GAMMA) return false;
   if (dist > MAX_DISTANCE_PERCENT) return false;
   if (spread > MAX_SPREAD_PERCENT) return false;
-  if (dte < 0 || dte > 10) return false;
+  if (dte < 1 || dte > 10) return false;
 
   const quality = contractQualityScore(item, stock);
   if (quality < MIN_CONTRACT_QUALITY_SCORE) return false;
