@@ -41,11 +41,11 @@ const blockedSymbols = new Set();
 let botPaused = false;
 let scanIndex = 0;
 
-const SCAN_INTERVAL_MS = 3 * 60 * 1000;
-const SYMBOLS_PER_SCAN = 3;
+const SCAN_INTERVAL_MS = 5 * 60 * 1000;
+const SYMBOLS_PER_SCAN = 2;
 
-const UPDATE_INTERVAL_MS = 30 * 1000;
-const ANALYSIS_REFRESH_MS = 2 * 60 * 1000;
+const UPDATE_INTERVAL_MS = 60 * 1000;
+const ANALYSIS_REFRESH_MS = 3 * 60 * 1000;
 
 // وقف فني فقط
 const TECHNICAL_STOP_CHECK_MS = 2 * 60 * 1000;
@@ -2056,6 +2056,7 @@ async function scanSingleSymbol(symbol, force = false) {
     };
   }
 
+  if (force) {
   const marketOpen = await isMarketOpenNow();
 
   if (!marketOpen) {
@@ -2064,6 +2065,7 @@ async function scanSingleSymbol(symbol, force = false) {
       message: '⛔ السوق مغلق حالياً.'
     };
   }
+}
 
   if (!isAllowedSignalTime(symbol)) {
     return {
