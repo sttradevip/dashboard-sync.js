@@ -42,7 +42,7 @@ const blockedSymbols = new Set();
 let botPaused = false;
 let scanIndex = 0;
 
-const SCAN_INTERVAL_MS = 5 * 60 * 1000;
+const SCAN_INTERVAL_MS = 10 * 60 * 1000;
 const SYMBOLS_PER_SCAN = 2;
 
 const UPDATE_INTERVAL_MS = 60 * 1000;
