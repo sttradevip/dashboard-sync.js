@@ -62,12 +62,14 @@ const finnhubPriceCache = new Map();
 const ATR_LENGTH = 14;
 
 const TP1_ATR_MULTIPLIER = 1.0;
-const TP2_ATR_MULTIPLIER = 1.5;
-const TP3_ATR_MULTIPLIER = 2.0;
+const TP2_ATR_MULTIPLIER = 2.0;
+const TP3_ATR_MULTIPLIER = 3.0;
 
-// الوقف ليس ATR فقط
 // الوقف فني، لكن لازم يكون الكسر مؤكد بمسافة ATR
 const STOP_ATR_CONFIRM_MULTIPLIER = 0.7;
+
+// Trailing Stop
+const ENABLE_TRAILING_STOP = true;
 
 // =====================
 // Technical Stop Only
@@ -108,6 +110,9 @@ const MIN_TOTAL_SCORE = 80;
 const MIN_TECHNICAL_SCORE = 65;
 const MIN_CONTRACT_QUALITY_SCORE = 75;
 const MIN_SMART_FLOW_SCORE = 70;
+
+// التقييم النهائي المعروض للمشترك
+const MIN_FINAL_RATING_TO_SEND = 80;
 
 // =====================
 // Helpers
@@ -312,9 +317,10 @@ function markSentToday(trade) {
 function tradeTitle(trade) {
   return `${trade.symbol} ${trade.type} ${trade.strike}`;
 }
-
 function isETF(symbol) {
-  return ['SPY', 'QQQ'].includes(String(symbol).toUpperCase());
+  return ['SPY', 'QQQ'].includes(
+    String(symbol).toUpperCase()
+  );
 }
 
 function isAllowedSignalTime(symbol) {
@@ -328,13 +334,17 @@ function isAllowedSignalTime(symbol) {
 
   const hour = saTime.getHours();
   const minute = saTime.getMinutes();
-  const totalMinutes = hour * 60 + minute;
+
+  const totalMinutes =
+    hour * 60 + minute;
 
   const start = 16 * 60 + 30;
   const stocksEnd = 23 * 60;
   const etfEnd = 24 * 60;
 
-  if (totalMinutes < start) return false;
+  if (totalMinutes < start) {
+    return false;
+  }
 
   if (isETF(symbol)) {
     return totalMinutes <= etfEnd;
@@ -344,10 +354,15 @@ function isAllowedSignalTime(symbol) {
 }
 
 function isExpiredTrade(trade) {
-  if (!trade.expiration) return false;
+  if (!trade.expiration) {
+    return false;
+  }
 
   const now = new Date();
-  const exp = new Date(trade.expiration + 'T23:59:59Z');
+
+  const exp = new Date(
+    trade.expiration + 'T23:59:59Z'
+  );
 
   return exp.getTime() < now.getTime();
 }
@@ -366,19 +381,40 @@ function isContractNotFoundError(err) {
     msg.includes('not found')
   );
 }
+
 // =====================
 // ATR Helpers
 // =====================
 
-function calculateATR(candles, length = ATR_LENGTH) {
-  if (!candles || candles.length < length + 1) return null;
+function calculateATR(
+  candles,
+  length = ATR_LENGTH
+) {
+  if (
+    !candles ||
+    candles.length < length + 1
+  ) {
+    return null;
+  }
 
   const trueRanges = [];
 
-  for (let i = 1; i < candles.length; i++) {
-    const high = Number(candles[i].h);
-    const low = Number(candles[i].l);
-    const prevClose = Number(candles[i - 1].c);
+  for (
+    let i = 1;
+    i < candles.length;
+    i++
+  ) {
+    const high = Number(
+      candles[i].h
+    );
+
+    const low = Number(
+      candles[i].l
+    );
+
+    const prevClose = Number(
+      candles[i - 1].c
+    );
 
     const tr = Math.max(
       high - low,
@@ -389,21 +425,41 @@ function calculateATR(candles, length = ATR_LENGTH) {
     trueRanges.push(tr);
   }
 
-  const recent = trueRanges.slice(-length);
+  const recent =
+    trueRanges.slice(-length);
 
-  if (!recent.length) return null;
+  if (!recent.length) {
+    return null;
+  }
 
   const atr =
-    recent.reduce((sum, v) => sum + v, 0) / recent.length;
+    recent.reduce(
+      (sum, v) => sum + v,
+      0
+    ) / recent.length;
 
-  return Number(atr.toFixed(4));
+  return Number(
+    atr.toFixed(4)
+  );
 }
 
-function calculateAtrTargets(stockEntry, type, atr) {
-  const entry = Number(stockEntry);
-  const a = Number(atr);
+function calculateAtrTargets(
+  stockEntry,
+  type,
+  atr
+) {
+  const entry =
+    Number(stockEntry);
 
-  if (!entry || !a || entry <= 0 || a <= 0) {
+  const a =
+    Number(atr);
+
+  if (
+    !entry ||
+    !a ||
+    entry <= 0 ||
+    a <= 0
+  ) {
     return {
       stockEntry: null,
       stockTarget1: null,
@@ -413,22 +469,62 @@ function calculateAtrTargets(stockEntry, type, atr) {
     };
   }
 
-  const dir = type === 'CALL' ? 1 : -1;
+  const dir =
+    type === 'CALL'
+      ? 1
+      : -1;
 
   return {
-    stockEntry: Number(entry.toFixed(2)),
-    stockTarget1: Number((entry + dir * a * TP1_ATR_MULTIPLIER).toFixed(2)),
-    stockTarget2: Number((entry + dir * a * TP2_ATR_MULTIPLIER).toFixed(2)),
-    stockTarget3: Number((entry + dir * a * TP3_ATR_MULTIPLIER).toFixed(2)),
+    stockEntry: Number(
+      entry.toFixed(2)
+    ),
+
+    stockTarget1: Number(
+      (
+        entry +
+        dir *
+        a *
+        TP1_ATR_MULTIPLIER
+      ).toFixed(2)
+    ),
+
+    stockTarget2: Number(
+      (
+        entry +
+        dir *
+        a *
+        TP2_ATR_MULTIPLIER
+      ).toFixed(2)
+    ),
+
+    stockTarget3: Number(
+      (
+        entry +
+        dir *
+        a *
+        TP3_ATR_MULTIPLIER
+      ).toFixed(2)
+    ),
+
     atr: a
   };
 }
 
-async function buildAtrTradeTargets(symbol, type) {
+async function buildAtrTradeTargets(
+  symbol,
+  type
+) {
   try {
-    const candles = await getIntradayCandles(symbol);
+    const candles =
+      await getIntradayCandles(
+        symbol
+      );
 
-    if (!candles || candles.length < ATR_LENGTH + 5) {
+    if (
+      !candles ||
+      candles.length <
+        ATR_LENGTH + 5
+    ) {
       return {
         stockEntry: null,
         stockTarget1: null,
@@ -438,15 +534,38 @@ async function buildAtrTradeTargets(symbol, type) {
       };
     }
 
-    const stockPrice = await getLatestStockPrice(symbol);
-    const last = candles[candles.length - 1];
+    const stockPrice =
+      await getLatestStockPrice(
+        symbol
+      );
 
-    const entry = stockPrice || Number(last.c);
-    const atr = calculateATR(candles, ATR_LENGTH);
+    const last =
+      candles[
+        candles.length - 1
+      ];
 
-    return calculateAtrTargets(entry, type, atr);
+    const entry =
+      stockPrice ||
+      Number(last.c);
+
+    const atr =
+      calculateATR(
+        candles,
+        ATR_LENGTH
+      );
+
+    return calculateAtrTargets(
+      entry,
+      type,
+      atr
+    );
+
   } catch (err) {
-    console.error(`ATR Target Error ${symbol}:`, err.message);
+
+    console.error(
+      `ATR Target Error ${symbol}:`,
+      err.message
+    );
 
     return {
       stockEntry: null,
@@ -458,20 +577,103 @@ async function buildAtrTradeTargets(symbol, type) {
   }
 }
 
-function ensureAtrTargets(trade) {
+function ensureAtrTargets(
+  trade
+) {
+  if (!trade) {
+    return trade;
+  }
+
+  if (
+    !trade.stockTarget1 &&
+    trade.atr &&
+    trade.stockEntry
+  ) {
+    const targets =
+      calculateAtrTargets(
+        trade.stockEntry,
+        trade.type,
+        trade.atr
+      );
+
+    trade.stockTarget1 =
+      targets.stockTarget1;
+
+    trade.stockTarget2 =
+      targets.stockTarget2;
+
+    trade.stockTarget3 =
+      targets.stockTarget3;
+  }
+
+  return trade;
+}
+// =====================
+// Rating Helpers
+// =====================
+
+function calculateBonusScore(trade) {
+  let bonus = 0;
+
+  const quality = Number(trade.contractQuality || 0);
+  const flow = Number(trade.smartFlow || 0);
+  const tech = Number(trade.technicalScore || 0);
+  const gamma = Number(trade.gamma || 0);
+  const volume = Number(trade.volume || 0);
+  const oi = Number(trade.oi || 0);
+  const delta = Math.abs(Number(trade.delta || 0));
+
+  if (quality >= 80) bonus += 10;
+  if (flow >= 80) bonus += 10;
+  if (tech >= 75) bonus += 10;
+
+  if (gamma >= 0.08) bonus += 5;
+  if (volume > oi && oi > 0) bonus += 5;
+  if (volume > oi * 2 && oi > 0) bonus += 5;
+
+  if (delta >= 0.32 && delta <= 0.40) {
+    bonus += 5;
+  }
+
+  if (trade.flowStrength === 'STRONG') {
+    bonus += 5;
+  }
+
+  return Math.min(bonus, 40);
+}
+
+function calculateFinalRating(trade) {
+  const quality = Number(trade.contractQuality || 0);
+  const flow = Number(trade.smartFlow || 0);
+  const tech = Number(trade.technicalScore || 0);
+  const bonus = Number(trade.bonusScore || calculateBonusScore(trade));
+
+  const rating =
+    quality * 0.35 +
+    flow * 0.35 +
+    tech * 0.20 +
+    bonus * 0.10;
+
+  return Math.min(100, Math.round(rating));
+}
+
+function ratingLabel(rating) {
+  const r = Number(rating || 0);
+
+  if (r >= 95) return '🔥 نادر جدًا';
+  if (r >= 90) return '🟢 ممتاز';
+  if (r >= 85) return '✅ قوي';
+  if (r >= 80) return '🟡 جيد';
+
+  return '❌ ضعيف';
+}
+
+function applyRatingToTrade(trade) {
   if (!trade) return trade;
 
-  if (!trade.stockTarget1 && trade.atr && trade.stockEntry) {
-    const targets = calculateAtrTargets(
-      trade.stockEntry,
-      trade.type,
-      trade.atr
-    );
-
-    trade.stockTarget1 = targets.stockTarget1;
-    trade.stockTarget2 = targets.stockTarget2;
-    trade.stockTarget3 = targets.stockTarget3;
-  }
+  trade.bonusScore = calculateBonusScore(trade);
+  trade.finalRating = calculateFinalRating(trade);
+  trade.ratingLabel = ratingLabel(trade.finalRating);
 
   return trade;
 }
@@ -607,7 +809,6 @@ function markTradeActive(trade) {
   activeTrades.set(tradeKey(trade.symbol), trade);
   saveTradeToSupabase(trade);
 }
-
 async function loadOpenTradesFromSupabase() {
   try {
     const { data, error } = await supabase
@@ -651,6 +852,8 @@ async function loadOpenTradesFromSupabase() {
         target2Sent: false,
         target3Sent: false,
 
+        trailLevel: 'NONE',
+
         status: 'OPEN',
         lastUpdatePrice: Number(row.current_price),
 
@@ -672,8 +875,13 @@ async function loadOpenTradesFromSupabase() {
         technicalBias: 'LOADED',
         technicalScore: 0,
         technicalReason: 'بانتظار تحديث التحليل من Massive',
+
         contractQuality: null,
         smartFlow: null,
+        bonusScore: 0,
+        finalRating: 0,
+        ratingLabel: 'غير متوفر',
+
         flowBias: 'LOADED',
         flowStrength: 'LOADED',
         dte: daysToExpiration(row.expiration),
@@ -749,6 +957,7 @@ async function getStockPriceFromFinnhub(symbol) {
     return null;
   }
 }
+
 // =====================
 // Massive API
 // =====================
@@ -870,7 +1079,6 @@ async function getOptionSnapshot(symbol, contractTicker) {
 
   return data.results || data;
 }
-
 // =====================
 // Image Card
 // =====================
@@ -1141,7 +1349,6 @@ function contractQualityScore(item, stock) {
 
   return Math.min(score, 100);
 }
-
 function smartFlowScore(item, stock, flowBias = null) {
   const type = getContractType(item);
   const volume = getVolume(item);
@@ -1180,6 +1387,7 @@ function smartFlowScore(item, stock, flowBias = null) {
 
   return Math.min(score, 100);
 }
+
 function flowItemScore(item, stock) {
   const type = getContractType(item);
   const strike = getStrike(item);
@@ -1421,7 +1629,6 @@ function contractScore(
 
   return Math.round(score);
 }
-
 function selectBestContract(
   symbol,
   stock,
@@ -1485,10 +1692,13 @@ function selectBestContract(
     return null;
   }
 
+  const contractQuality = contractQualityScore(item, stock);
+  const smartFlow = smartFlowScore(item, stock, flowBias);
+
   const target = Number((entry + Math.max(entry * 0.25, 0.25)).toFixed(2));
   const stop = 0;
 
-  return {
+  const trade = {
     symbol,
     type,
     strike,
@@ -1512,6 +1722,8 @@ function selectBestContract(
     target2Sent: false,
     target3Sent: false,
 
+    trailLevel: 'NONE',
+
     score: best.score,
 
     technicalBias: technicalBias?.side || 'NEUTRAL',
@@ -1521,8 +1733,12 @@ function selectBestContract(
     flowBias: flowBias.side,
     flowStrength: flowBias.strength,
 
-    contractQuality: contractQualityScore(item, stock),
-    smartFlow: smartFlowScore(item, stock, flowBias),
+    contractQuality,
+    smartFlow,
+
+    bonusScore: 0,
+    finalRating: 0,
+    ratingLabel: 'غير متوفر',
 
     volume: getVolume(item),
     oi: getOI(item),
@@ -1549,6 +1765,14 @@ function selectBestContract(
     lastTechStopCheckAt: 0,
     technicalStopReason: null
   };
+
+  applyRatingToTrade(trade);
+
+  if (trade.finalRating < MIN_FINAL_RATING_TO_SEND) {
+    return null;
+  }
+
+  return trade;
 }
 
 // =====================
@@ -1556,6 +1780,8 @@ function selectBestContract(
 // =====================
 
 function buildTradeCaption(trade, mode = 'entry') {
+  applyRatingToTrade(trade);
+
   const percent = pnlPercent(trade.entry, trade.current);
 
   const statusLine =
@@ -1599,6 +1825,7 @@ ${statusLine}
 🎯 هدف السهم 3: ${fmtPrice(trade.stockTarget3)}
 
 🛑 الوقف: وقف فني + تأكيد ATR
+🧲 الوقف المتحرك: ${trade.trailLevel || 'NONE'}
 
 ━━━━━━━━━━━━━━
 
@@ -1622,10 +1849,14 @@ IV: ${
 
 📊 الاتجاه الفني: ${trade.technicalBias || 'غير متوفر'}
 🧠 سبب الفلترة: ${trade.technicalReason || 'غير متوفر'}
-⭐ جودة العقد: ${fmt(trade.contractQuality)}
-🔥 تدفق ذكي: ${fmt(trade.smartFlow)}
 
-⭐ جودة الفلترة: ${fmt(trade.score)}
+⭐ جودة العقد: ${fmt(trade.contractQuality)}/100
+🔥 تدفق ذكي: ${fmt(trade.smartFlow)}/100
+📊 جودة الاتجاه: ${fmt(trade.technicalScore)}/100
+⚡ نقاط إضافية: +${fmt(trade.bonusScore)}
+
+🏆 التقييم النهائي: ${fmt(trade.finalRating)}/100
+✅ تصنيف الصفقة: ${trade.ratingLabel}
 
 ⏱ آخر تحديث:
 ${new Date().toLocaleString('ar-SA', {
@@ -1680,7 +1911,10 @@ async function editTradeCaption(trade) {
     return false;
   }
 }
+
 async function sendTradeUpdate(trade) {
+  applyRatingToTrade(trade);
+
   await updateTradeInSupabase(trade);
   await editTradeCaption(trade);
 
@@ -1722,6 +1956,17 @@ ${fmtPrice(trade.stockTarget2)}
 🎯 هدف السهم 3:
 ${fmtPrice(trade.stockTarget3)}
 
+🧲 الوقف المتحرك:
+${trade.trailLevel || 'NONE'}
+
+━━━━━━━━━━━━━━
+
+🏆 التقييم النهائي:
+${fmt(trade.finalRating)}/100
+
+✅ تصنيف الصفقة:
+${trade.ratingLabel}
+
 🛑 الوقف:
 وقف فني + تأكيد ATR
 
@@ -1737,7 +1982,7 @@ ${fmtPrice(trade.stockTarget3)}
 }
 
 async function sendProfitUpdate(trade, level) {
-  const percent = pnlPercent(trade.entry, trade.current);
+  applyRatingToTrade(trade);
 
   await updateTradeInSupabase(trade);
   await editTradeCaption(trade);
@@ -1747,11 +1992,6 @@ async function sendProfitUpdate(trade, level) {
 
 📊 ${tradeTitle(trade)}
 
-📅 الانتهاء:
-${trade.expiration}
-
-━━━━━━━━━━━━━━
-
 💰 دخول العقد:
 $${fmtPrice(trade.entry)}
 
@@ -1759,24 +1999,13 @@ $${fmtPrice(trade.entry)}
 $${fmtPrice(trade.current)}
 
 📈 الربح الحالي:
-${percent}%
+${pnlPercent(trade.entry, trade.current)}%
 
 🎯 وصل ربح العقد:
 +${level}%
 
-━━━━━━━━━━━━━━
-
-🎯 هدف السهم 1:
-${fmtPrice(trade.stockTarget1)}
-
-🎯 هدف السهم 2:
-${fmtPrice(trade.stockTarget2)}
-
-🎯 هدف السهم 3:
-${fmtPrice(trade.stockTarget3)}
-
-🛑 الوقف:
-وقف فني + تأكيد ATR
+🏆 التقييم النهائي:
+${fmt(trade.finalRating)}/100
 
 🔥 ST TRADE VIP`;
 
@@ -1793,43 +2022,34 @@ async function sendTarget1Hit(trade) {
   trade.target1Sent = true;
   trade.status = 'TARGET1';
 
+  if (ENABLE_TRAILING_STOP && trade.trailLevel === 'NONE') {
+    trade.trailLevel = 'BREAKEVEN';
+  }
+
   await updateTradeInSupabase(trade);
   await editTradeCaption(trade);
 
-  const text =
+  await bot.sendMessage(
+    CHAT_ID,
 `🎯 تم تحقيق الهدف الأول
 
 📊 ${tradeTitle(trade)}
 
-📅 الانتهاء:
-${trade.expiration}
-
-━━━━━━━━━━━━━━
-
 💰 دخول العقد:
 $${fmtPrice(trade.entry)}
 
-💵 سعر العقد الحالي:
+💵 السعر الحالي:
 $${fmtPrice(trade.current)}
 
-📈 الربح الحالي:
+📈 الربح:
 ${pnlPercent(trade.entry, trade.current)}%
 
-━━━━━━━━━━━━━━
+✅ تم الوصول إلى TP1
+🧲 تم رفع الوقف المتحرك إلى منطقة الدخول
 
-🎯 هدف السهم 1:
-${fmtPrice(trade.stockTarget1)}
+🎯 الهدف القادم: TP2
 
-🎯 الهدف التالي:
-${fmtPrice(trade.stockTarget2)}
-
-✅ الصفقة مستمرة للهدف الثاني
-
-🔥 ST TRADE VIP`;
-
-  await bot.sendMessage(
-    CHAT_ID,
-    text,
+🔥 ST TRADE VIP`,
     {
       message_thread_id: THREAD_ID
     }
@@ -1840,43 +2060,34 @@ async function sendTarget2Hit(trade) {
   trade.target2Sent = true;
   trade.status = 'TARGET2';
 
+  if (ENABLE_TRAILING_STOP && trade.trailLevel !== 'TP1') {
+    trade.trailLevel = 'TP1';
+  }
+
   await updateTradeInSupabase(trade);
   await editTradeCaption(trade);
 
-  const text =
+  await bot.sendMessage(
+    CHAT_ID,
 `🎯 تم تحقيق الهدف الثاني
 
 📊 ${tradeTitle(trade)}
 
-📅 الانتهاء:
-${trade.expiration}
-
-━━━━━━━━━━━━━━
-
 💰 دخول العقد:
 $${fmtPrice(trade.entry)}
 
-💵 سعر العقد الحالي:
+💵 السعر الحالي:
 $${fmtPrice(trade.current)}
 
-📈 الربح الحالي:
+📈 الربح:
 ${pnlPercent(trade.entry, trade.current)}%
 
-━━━━━━━━━━━━━━
+✅ تم الوصول إلى TP2
+🧲 تم رفع الوقف المتحرك إلى TP1
 
-🎯 هدف السهم 2:
-${fmtPrice(trade.stockTarget2)}
+🎯 الهدف القادم: TP3
 
-🎯 الهدف التالي:
-${fmtPrice(trade.stockTarget3)}
-
-✅ الصفقة مستمرة للهدف الثالث
-
-🔥 ST TRADE VIP`;
-
-  await bot.sendMessage(
-    CHAT_ID,
-    text,
+🔥 ST TRADE VIP`,
     {
       message_thread_id: THREAD_ID
     }
@@ -1890,37 +2101,25 @@ async function sendTarget3Hit(trade) {
   await closeTradeInSupabase(trade);
   await editTradeCaption(trade);
 
-  const text =
-`🏆 تم تحقيق الهدف الثالث وإغلاق الصفقة
+  await bot.sendMessage(
+    CHAT_ID,
+`🏆 تم تحقيق الهدف الثالث
 
 📊 ${tradeTitle(trade)}
-
-📅 الانتهاء:
-${trade.expiration}
-
-━━━━━━━━━━━━━━
 
 💰 دخول العقد:
 $${fmtPrice(trade.entry)}
 
-💵 سعر العقد الحالي:
+💵 سعر الإغلاق:
 $${fmtPrice(trade.current)}
 
 📈 الربح النهائي:
 ${pnlPercent(trade.entry, trade.current)}%
 
-━━━━━━━━━━━━━━
+🎯 تم تحقيق TP3
+✅ تم إغلاق الصفقة تلقائياً
 
-🎯 هدف السهم 3:
-${fmtPrice(trade.stockTarget3)}
-
-✅ تم إغلاق الصفقة بعد تحقق الهدف الثالث
-
-🔥 ST TRADE VIP`;
-
-  await bot.sendMessage(
-    CHAT_ID,
-    text,
+🔥 ST TRADE VIP`,
     {
       message_thread_id: THREAD_ID
     }
@@ -1933,21 +2132,11 @@ async function sendStopHit(trade) {
   await closeTradeInSupabase(trade);
   await editTradeCaption(trade);
 
-  const percent = pnlPercent(trade.entry, trade.current);
-
-  const reason =
-    trade.technicalStopReason ||
-    'تحقق وقف فني + تأكيد ATR';
-
-  const text =
-`❌ تم الخروج بوقف فني
+  await bot.sendMessage(
+    CHAT_ID,
+`❌ وقف فني
 
 📊 ${tradeTitle(trade)}
-
-📅 الانتهاء:
-${trade.expiration}
-
-━━━━━━━━━━━━━━
 
 💰 دخول العقد:
 $${fmtPrice(trade.entry)}
@@ -1956,18 +2145,12 @@ $${fmtPrice(trade.entry)}
 $${fmtPrice(trade.current)}
 
 📉 النتيجة:
-${percent}%
+${pnlPercent(trade.entry, trade.current)}%
 
-━━━━━━━━━━━━━━
+🧠 السبب:
+${trade.technicalStopReason || 'وقف فني'}
 
-🧠 سبب الخروج:
-${reason}
-
-🔥 ST TRADE VIP`;
-
-  await bot.sendMessage(
-    CHAT_ID,
-    text,
+🔥 ST TRADE VIP`,
     {
       message_thread_id: THREAD_ID
     }
@@ -2085,15 +2268,13 @@ async function enrichTradeAnalysis(trade, snapshotItem) {
         trade.technicalBias ||
         'غير متوفر';
 
-      trade.technicalScore =
-        technicalBias?.score ||
-        0;
-
+      trade.technicalScore = technicalBias?.score || 0;
       trade.technicalReason =
         technicalBias?.reason ||
         'تم تحديث السعر فقط';
 
       trade.lastAnalysisAt = now;
+      applyRatingToTrade(trade);
       return;
     }
 
@@ -2110,10 +2291,12 @@ async function enrichTradeAnalysis(trade, snapshotItem) {
     trade.smartFlow = smartFlowScore(item, stock, flowBias);
     trade.score = contractScore(item, stock, flowBias, technicalBias);
 
+    applyRatingToTrade(trade);
+
     trade.lastAnalysisAt = now;
 
     console.log(
-      `✅ تحليل محدث ${trade.symbol}: Volume=${trade.volume} OI=${trade.oi} Delta=${trade.delta} IV=${trade.iv}`
+      `✅ تحليل محدث ${trade.symbol}: Rating=${trade.finalRating} Volume=${trade.volume} OI=${trade.oi} Delta=${trade.delta} IV=${trade.iv}`
     );
   } catch (err) {
     console.error(`Enrich Analysis Error ${trade.symbol}:`, err.message);
@@ -2138,6 +2321,7 @@ function getRecentSupportResistance(candles) {
     resistance: Math.max(...recent.map(c => Number(c.h)))
   };
 }
+
 async function shouldTechnicalStop(trade) {
   const now = Date.now();
 
@@ -2167,11 +2351,42 @@ async function shouldTechnicalStop(trade) {
   const vwap = calculateVWAP(candles.slice(-78));
   const atr = calculateATR(candles, ATR_LENGTH);
 
-  const { support, resistance } =
-    getRecentSupportResistance(candles);
+  const { support, resistance } = getRecentSupportResistance(candles);
 
   if (!ema9 || !vwap || !atr) {
     return false;
+  }
+
+  if (ENABLE_TRAILING_STOP && trade.trailLevel === 'BREAKEVEN') {
+    if (trade.type === 'CALL' && lastClose <= Number(trade.stockEntry)) {
+      trade.technicalStopReason =
+        'وقف متحرك: رجع السهم لمنطقة الدخول بعد TP1';
+
+      return true;
+    }
+
+    if (trade.type === 'PUT' && lastClose >= Number(trade.stockEntry)) {
+      trade.technicalStopReason =
+        'وقف متحرك: رجع السهم لمنطقة الدخول بعد TP1';
+
+      return true;
+    }
+  }
+
+  if (ENABLE_TRAILING_STOP && trade.trailLevel === 'TP1') {
+    if (trade.type === 'CALL' && lastClose <= Number(trade.stockTarget1)) {
+      trade.technicalStopReason =
+        'وقف متحرك: رجع السهم إلى TP1 بعد تحقيق TP2';
+
+      return true;
+    }
+
+    if (trade.type === 'PUT' && lastClose >= Number(trade.stockTarget1)) {
+      trade.technicalStopReason =
+        'وقف متحرك: رجع السهم إلى TP1 بعد تحقيق TP2';
+
+      return true;
+    }
   }
 
   const technicalBias = await getTechnicalBias(trade.symbol);
@@ -2293,7 +2508,11 @@ async function refreshTradeData(trade) {
 async function updateActiveTrades() {
   for (const [symbol, trade] of activeTrades.entries()) {
     try {
-      if (trade.status !== 'OPEN' && trade.status !== 'TARGET1' && trade.status !== 'TARGET2') {
+      if (
+        trade.status !== 'OPEN' &&
+        trade.status !== 'TARGET1' &&
+        trade.status !== 'TARGET2'
+      ) {
         continue;
       }
 
@@ -2417,82 +2636,51 @@ async function updateActiveTrades() {
   }
 }
 
-// =====================
-// Scanner
-// =====================
-
 async function scanSingleSymbol(symbol, force = false) {
   symbol = String(symbol || '').trim().toUpperCase();
 
   if (!symbol) {
-    return {
-      ok: false,
-      message: '⚠️ الرمز غير صحيح.'
-    };
+    return { ok: false, message: '⚠️ الرمز غير صحيح.' };
   }
 
   if (botPaused && !force) {
-    return {
-      ok: false,
-      message: '⏸ البوت متوقف عن طرح صفقات جديدة.'
-    };
+    return { ok: false, message: '⏸ البوت متوقف عن طرح صفقات جديدة.' };
   }
 
   if (!force && blockedSymbols.has(symbol)) {
-    return {
-      ok: false,
-      message: `⛔ ${symbol} موقوف من طرح الصفقات.`
-    };
+    return { ok: false, message: `⛔ ${symbol} موقوف من طرح الصفقات.` };
   }
 
   if (alreadyHasActiveTrade(symbol)) {
-    return {
-      ok: false,
-      message: `⚠️ يوجد صفقة مفتوحة مسبقًا على ${symbol}.`
-    };
+    return { ok: false, message: `⚠️ يوجد صفقة مفتوحة مسبقًا على ${symbol}.` };
   }
 
   if (force) {
     const marketOpen = await isMarketOpenNow();
 
     if (!marketOpen) {
-      return {
-        ok: false,
-        message: '⛔ السوق مغلق حالياً.'
-      };
+      return { ok: false, message: '⛔ السوق مغلق حالياً.' };
     }
   }
 
   if (!isAllowedSignalTime(symbol)) {
-    return {
-      ok: false,
-      message: `⛔ الوقت الحالي خارج وقت طرح صفقات ${symbol}.`
-    };
+    return { ok: false, message: `⛔ الوقت الحالي خارج وقت طرح صفقات ${symbol}.` };
   }
 
   const stock = await getStockSnapshot(symbol);
 
   if (!stock) {
-    return {
-      ok: false,
-      message: `⚠️ لم أستطع جلب بيانات ${symbol}.`
-    };
+    return { ok: false, message: `⚠️ لم أستطع جلب بيانات ${symbol}.` };
   }
 
   const technicalBias = await getTechnicalBias(symbol);
 
   if (!technicalBias || technicalBias.side === 'NEUTRAL') {
-    return {
-      ok: false,
-      message: `⚠️ ${symbol}: لا يوجد اتجاه فني واضح.`
-    };
+    return { ok: false, message: `⚠️ ${symbol}: لا يوجد اتجاه فني واضح.` };
   }
 
   if (technicalBias.score < MIN_TECHNICAL_SCORE) {
-    return {
-      ok: false,
-      message: `⚠️ ${symbol}: قوة الاتجاه الفني أقل من المطلوب.`
-    };
+    return { ok: false, message: `⚠️ ${symbol}: قوة الاتجاه الفني أقل من المطلوب.` };
   }
 
   const atrTargets = await buildAtrTradeTargets(
@@ -2515,10 +2703,7 @@ async function scanSingleSymbol(symbol, force = false) {
   const chain = await getOptionsChain(symbol);
 
   if (!chain.length) {
-    return {
-      ok: false,
-      message: `⚠️ لا توجد عقود متاحة على ${symbol}.`
-    };
+    return { ok: false, message: `⚠️ لا توجد عقود متاحة على ${symbol}.` };
   }
 
   const trade = selectBestContract(
@@ -2530,17 +2715,11 @@ async function scanSingleSymbol(symbol, force = false) {
   );
 
   if (!trade) {
-    return {
-      ok: false,
-      message: `⚠️ لا توجد صفقة قوية مطابقة للشروط على ${symbol}.`
-    };
+    return { ok: false, message: `⚠️ لا توجد صفقة قوية مطابقة للشروط على ${symbol}.` };
   }
 
   if (!force && wasSentToday(trade)) {
-    return {
-      ok: false,
-      message: `⚠️ تم إرسال نفس صفقة ${symbol} اليوم سابقًا.`
-    };
+    return { ok: false, message: `⚠️ تم إرسال نفس صفقة ${symbol} اليوم سابقًا.` };
   }
 
   await sendTradeEntry(trade);
@@ -2548,10 +2727,7 @@ async function scanSingleSymbol(symbol, force = false) {
   markTradeActive(trade);
   markSentToday(trade);
 
-  return {
-    ok: true,
-    message: `✅ تم إرسال صفقة ${symbol}.`
-  };
+  return { ok: true, message: `✅ تم إرسال صفقة ${symbol}.` };
 }
 
 async function scanForTrades() {
@@ -2586,23 +2762,11 @@ async function scanForTrades() {
 
   for (const symbol of symbolsToScan) {
     try {
-      if (blockedSymbols.has(symbol)) {
-        console.log(`⛔ ${symbol} blocked.`);
-        continue;
-      }
-
-      if (!isAllowedSignalTime(symbol)) {
-        console.log(`⛔ ${symbol} outside signal time.`);
-        continue;
-      }
-
-      if (alreadyHasActiveTrade(symbol)) {
-        console.log(`⚠️ ${symbol} already has active trade.`);
-        continue;
-      }
+      if (blockedSymbols.has(symbol)) continue;
+      if (!isAllowedSignalTime(symbol)) continue;
+      if (alreadyHasActiveTrade(symbol)) continue;
 
       const result = await scanSingleSymbol(symbol, false);
-
       console.log(`${symbol}: ${result.message}`);
 
     } catch (err) {
@@ -2616,10 +2780,7 @@ async function scanForTrades() {
 // =====================
 
 bot.onText(/\/start/, async (msg) => {
-  await sendToSameTopic(
-    msg,
-    '🚀 ST Signals Bot يعمل بنجاح'
-  );
+  await sendToSameTopic(msg, '🚀 ST Signals Bot يعمل بنجاح');
 });
 
 bot.onText(/\/id/, async (msg) => {
@@ -2640,74 +2801,14 @@ ${msg.message_thread_id || 'لا يوجد'}`
 
 bot.onText(/\/pause/, async (msg) => {
   if (!isAdmin(msg)) return;
-
   botPaused = true;
-
-  await sendToSameTopic(
-    msg,
-    '⏸ تم إيقاف طرح الصفقات الجديدة.'
-  );
+  await sendToSameTopic(msg, '⏸ تم إيقاف طرح الصفقات الجديدة.');
 });
 
 bot.onText(/\/resume/, async (msg) => {
   if (!isAdmin(msg)) return;
-
   botPaused = false;
-
-  await sendToSameTopic(
-    msg,
-    '▶️ تم تشغيل طرح الصفقات من جديد.'
-  );
-});
-
-bot.onText(/\/botstatus/, async (msg) => {
-  if (!isAdmin(msg)) return;
-
-  const openTrades =
-    [...activeTrades.values()]
-      .map(
-        t =>
-          `• ${t.symbol} ${t.type} ${t.strike} | عقد $${fmtPrice(t.current)} | سهم ${fmtPrice(t.stockEntry)} | TP1 ${fmtPrice(t.stockTarget1)} | TP2 ${fmtPrice(t.stockTarget2)} | TP3 ${fmtPrice(t.stockTarget3)}`
-      )
-      .join('\n');
-
-  const nextSymbols = [];
-
-  for (let i = 0; i < SYMBOLS_PER_SCAN; i++) {
-    if (SYMBOLS.length) {
-      nextSymbols.push(SYMBOLS[(scanIndex + i) % SYMBOLS.length]);
-    }
-  }
-
-  await sendToSameTopic(
-    msg,
-`📊 حالة بوت الصفقات
-
-الحالة:
-${botPaused ? '⏸ متوقف' : '▶️ يعمل'}
-
-نظام الفحص:
-${SYMBOLS_PER_SCAN} أسهم كل دورة
-
-الأسهم القادمة للفحص:
-${nextSymbols.length ? nextSymbols.join(', ') : 'غير متوفر'}
-
-قائمة الأسهم:
-${SYMBOLS.join(', ')}
-
-عدد الصفقات المفتوحة:
-${activeTrades.size}
-
-الأسهم الموقوفة:
-${
-  blockedSymbols.size
-    ? [...blockedSymbols].join(', ')
-    : 'لا يوجد'
-}
-
-الصفقات المفتوحة:
-${openTrades || 'لا توجد صفقات'}`
-  );
+  await sendToSameTopic(msg, '▶️ تم تشغيل طرح الصفقات من جديد.');
 });
 
 bot.onText(/\/signal\s+([A-Za-z]{1,10})/, async (msg, match) => {
@@ -2715,17 +2816,31 @@ bot.onText(/\/signal\s+([A-Za-z]{1,10})/, async (msg, match) => {
 
   const symbol = match[1].toUpperCase();
 
-  await sendToSameTopic(
-    msg,
-    `🔎 جاري فحص ${symbol}...`
-  );
+  await sendToSameTopic(msg, `🔎 جاري فحص ${symbol}...`);
 
   const result = await scanSingleSymbol(symbol, true);
 
-  await sendToSameTopic(
-    msg,
-    result.message
-  );
+  await sendToSameTopic(msg, result.message);
+});
+
+bot.onText(/\/scan/, async (msg) => {
+  if (!isAdmin(msg)) return;
+
+  await sendToSameTopic(msg, `🔎 جاري فحص ${SYMBOLS_PER_SCAN} أسهم...`);
+
+  await scanForTrades();
+
+  await sendToSameTopic(msg, '✅ انتهى الفحص.');
+});
+
+bot.onText(/\/update/, async (msg) => {
+  if (!isAdmin(msg)) return;
+
+  await sendToSameTopic(msg, '🔄 جاري تحديث الصفقات المفتوحة...');
+
+  await updateActiveTrades();
+
+  await sendToSameTopic(msg, '✅ انتهى تحديث الصفقات.');
 });
 
 bot.onText(/\/block\s+([A-Za-z]{1,10})/, async (msg, match) => {
@@ -2735,10 +2850,7 @@ bot.onText(/\/block\s+([A-Za-z]{1,10})/, async (msg, match) => {
 
   blockedSymbols.add(symbol);
 
-  await sendToSameTopic(
-    msg,
-    `⛔ تم إيقاف ${symbol}`
-  );
+  await sendToSameTopic(msg, `⛔ تم إيقاف ${symbol}`);
 });
 
 bot.onText(/\/unblock\s+([A-Za-z]{1,10})/, async (msg, match) => {
@@ -2748,23 +2860,7 @@ bot.onText(/\/unblock\s+([A-Za-z]{1,10})/, async (msg, match) => {
 
   blockedSymbols.delete(symbol);
 
-  await sendToSameTopic(
-    msg,
-    `✅ تم تفعيل ${symbol}`
-  );
-});
-
-bot.onText(/\/blocks/, async (msg) => {
-  if (!isAdmin(msg)) return;
-
-  const list = [...blockedSymbols];
-
-  await sendToSameTopic(
-    msg,
-    list.length
-      ? `⛔ الأسهم الموقوفة:\n${list.join('\n')}`
-      : '✅ لا توجد أسهم موقوفة.'
-  );
+  await sendToSameTopic(msg, `✅ تم تفعيل ${symbol}`);
 });
 
 bot.onText(/\/stoptrade\s+([A-Za-z]{1,10})/, async (msg, match) => {
@@ -2773,11 +2869,7 @@ bot.onText(/\/stoptrade\s+([A-Za-z]{1,10})/, async (msg, match) => {
   const symbol = match[1].toUpperCase();
 
   if (!activeTrades.has(symbol)) {
-    await sendToSameTopic(
-      msg,
-      `لا توجد صفقة على ${symbol}`
-    );
-
+    await sendToSameTopic(msg, `لا توجد صفقة على ${symbol}`);
     return;
   }
 
@@ -2787,80 +2879,9 @@ bot.onText(/\/stoptrade\s+([A-Za-z]{1,10})/, async (msg, match) => {
   trade.technicalStopReason = 'تم إغلاق الصفقة يدويًا من المالك';
 
   await closeTradeInSupabase(trade);
-
   removeTrade(symbol);
 
-  await sendToSameTopic(
-    msg,
-    `🛑 تم حذف صفقة ${symbol}`
-  );
-});
-
-bot.onText(/\/expiretrade\s+([A-Za-z]{1,10})/, async (msg, match) => {
-  if (!isAdmin(msg)) return;
-
-  const symbol = match[1].toUpperCase();
-
-  if (!activeTrades.has(symbol)) {
-    await sendToSameTopic(
-      msg,
-      `لا توجد صفقة مفتوحة على ${symbol}`
-    );
-
-    return;
-  }
-
-  const trade = activeTrades.get(symbol);
-
-  await closeExpiredTrade(
-    trade,
-    'تم إغلاق الصفقة يدويًا كعقد منتهي من المالك'
-  );
-
-  await sendToSameTopic(
-    msg,
-    `⏳ تم إنهاء صفقة ${symbol} كعقد منتهي`
-  );
-});
-
-bot.onText(/\/scan/, async (msg) => {
-  if (!isAdmin(msg)) return;
-
-  const nextSymbols = [];
-
-  for (let i = 0; i < SYMBOLS_PER_SCAN; i++) {
-    if (SYMBOLS.length) {
-      nextSymbols.push(SYMBOLS[(scanIndex + i) % SYMBOLS.length]);
-    }
-  }
-
-  await sendToSameTopic(
-    msg,
-    `🔎 جاري فحص ${SYMBOLS_PER_SCAN} أسهم: ${nextSymbols.join(', ')}`
-  );
-
-  await scanForTrades();
-
-  await sendToSameTopic(
-    msg,
-    '✅ انتهى الفحص.'
-  );
-});
-
-bot.onText(/\/update/, async (msg) => {
-  if (!isAdmin(msg)) return;
-
-  await sendToSameTopic(
-    msg,
-    '🔄 جاري تحديث الصفقات المفتوحة...'
-  );
-
-  await updateActiveTrades();
-
-  await sendToSameTopic(
-    msg,
-    '✅ انتهى تحديث الصفقات.'
-  );
+  await sendToSameTopic(msg, `🛑 تم حذف صفقة ${symbol}`);
 });
 
 // =====================
@@ -2872,15 +2893,8 @@ bot.onText(/\/update/, async (msg) => {
   await updateActiveTrades();
   await scanForTrades();
 
-  setInterval(
-    scanForTrades,
-    SCAN_INTERVAL_MS
-  );
-
-  setInterval(
-    updateActiveTrades,
-    UPDATE_INTERVAL_MS
-  );
+  setInterval(scanForTrades, SCAN_INTERVAL_MS);
+  setInterval(updateActiveTrades, UPDATE_INTERVAL_MS);
 
   console.log('🚀 ST Real Options Signals Bot Started');
 })();
