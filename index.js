@@ -2811,6 +2811,40 @@ bot.onText(/\/resume/, async (msg) => {
   await sendToSameTopic(msg, '▶️ تم تشغيل طرح الصفقات من جديد.');
 });
 
+bot.onText(/\/botstatus/, async (msg) => {
+  if (!isAdmin(msg)) return;
+
+  const openTrades =
+    [...activeTrades.values()]
+      .map(t =>
+        `• ${t.symbol} ${t.type} ${t.strike} | عقد $${fmtPrice(t.current)} | سهم ${fmtPrice(t.stockEntry)} | TP1 ${fmtPrice(t.stockTarget1)} | TP2 ${fmtPrice(t.stockTarget2)} | TP3 ${fmtPrice(t.stockTarget3)} | تقييم ${fmt(t.finalRating)}/100 | وقف ${t.trailLevel || 'NONE'}`
+      )
+      .join('\n');
+
+  await sendToSameTopic(
+    msg,
+`📊 حالة بوت الصفقات
+
+الحالة:
+${botPaused ? '⏸ متوقف' : '▶️ يعمل'}
+
+نظام الفحص:
+${SYMBOLS_PER_SCAN} أسهم كل دورة
+
+قائمة الأسهم:
+${SYMBOLS.join(', ')}
+
+عدد الصفقات المفتوحة:
+${activeTrades.size}
+
+الأسهم الموقوفة:
+${blockedSymbols.size ? [...blockedSymbols].join(', ') : 'لا يوجد'}
+
+الصفقات المفتوحة:
+${openTrades || 'لا توجد صفقات'}`
+  );
+});
+
 bot.onText(/\/signal\s+([A-Za-z]{1,10})/, async (msg, match) => {
   if (!isAdmin(msg)) return;
 
