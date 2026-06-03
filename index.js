@@ -108,11 +108,11 @@ const NEAR_STOP_DISTANCE = 0.05;
 
 const MIN_TOTAL_SCORE = 80;
 const MIN_TECHNICAL_SCORE = 65;
-const MIN_CONTRACT_QUALITY_SCORE = 75;
-const MIN_SMART_FLOW_SCORE = 70;
+const MIN_CONTRACT_QUALITY_SCORE = 65;
+const MIN_SMART_FLOW_SCORE = 60;
 
 // التقييم النهائي المعروض للمشترك
-const MIN_FINAL_RATING_TO_SEND = 80;
+const MIN_FINAL_RATING_TO_SEND = 75;
 
 // =====================
 // Helpers
