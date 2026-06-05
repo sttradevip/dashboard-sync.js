@@ -34,9 +34,7 @@ function distancePct(price, strike) {
 }
 
 async function getPrice(symbol) {
-  const url = 'https://finnhub.io/api/v1/quote';
-
-  const { data } = await axios.get(url, {
+  const { data } = await axios.get('https://finnhub.io/api/v1/quote', {
     params: {
       symbol,
       token: FINNHUB_API_KEY
@@ -101,6 +99,8 @@ function analyzeOptions(chain, price) {
 
   let totalGex = 0;
   let totalDex = 0;
+  let callVolume = 0;
+  let putVolume = 0;
 
   for (const item of chain) {
     const type = getType(item);
@@ -115,8 +115,6 @@ function analyzeOptions(chain, price) {
     if (!byStrike[strike]) {
       byStrike[strike] = {
         strike,
-        callGex: 0,
-        putGex: 0,
         netGex: 0,
         callLiquidity: 0,
         putLiquidity: 0
@@ -134,12 +132,12 @@ function analyzeOptions(chain, price) {
     const liquidityScore = volume + oi;
 
     if (type === 'call') {
-      byStrike[strike].callGex += rawGex;
+      callVolume += volume;
       byStrike[strike].callLiquidity += liquidityScore;
     }
 
     if (type === 'put') {
-      byStrike[strike].putGex += rawGex;
+      putVolume += volume;
       byStrike[strike].putLiquidity += liquidityScore;
     }
   }
@@ -148,7 +146,8 @@ function analyzeOptions(chain, price) {
     .filter(r => distancePct(price, r.strike) <= 15)
     .sort((a, b) => a.strike - b.strike);
 
-  const minPower = Math.max(...rows.map(r => Math.abs(r.netGex)), 1) * 0.03;
+  const maxPower = Math.max(...rows.map(r => Math.abs(r.netGex)), 1);
+  const minPower = maxPower * 0.03;
 
   const gammaResistances = rows
     .filter(r => r.strike >= price && Math.abs(r.netGex) >= minPower)
@@ -170,13 +169,66 @@ function analyzeOptions(chain, price) {
     .sort((a, b) => b.putLiquidity - a.putLiquidity)
     .slice(0, 3);
 
+  const gammaFlipRow = rows.reduce((best, row) => {
+    if (!best) return row;
+    return Math.abs(row.netGex) < Math.abs(best.netGex) ? row : best;
+  }, null);
+
+  const totalFlow = callVolume + putVolume;
+
+  const callFlow = totalFlow > 0
+    ? (callVolume / totalFlow) * 100
+    : null;
+
+  const putFlow = totalFlow > 0
+    ? (putVolume / totalFlow) * 100
+    : null;
+
+  const marketGamma = totalGex >= 0
+    ? 'إيجابية'
+    : 'سلبية';
+
+  let marketDirection = 'محايد';
+
+  if (totalDex > 0 && callFlow !== null && callFlow > putFlow) {
+    marketDirection = 'صاعد';
+  }
+
+  if (totalDex < 0 && putFlow !== null && putFlow > callFlow) {
+    marketDirection = 'هابط';
+  }
+
+  let confidenceScore = 0;
+
+  if (Math.abs(totalGex) > 0) confidenceScore += 2;
+  if (Math.abs(totalDex) > 0) confidenceScore += 2;
+
+  if (callFlow !== null && putFlow !== null) {
+    const flowDiff = Math.abs(callFlow - putFlow);
+
+    if (flowDiff >= 40) confidenceScore += 3;
+    else if (flowDiff >= 25) confidenceScore += 2;
+    else if (flowDiff >= 10) confidenceScore += 1;
+  }
+
+  if (marketDirection !== 'محايد') confidenceScore += 2;
+  if (gammaResistances.length && gammaSupports.length) confidenceScore += 1;
+
+  confidenceScore = Math.min(10, confidenceScore);
+
   return {
     gammaSupports,
     gammaResistances,
     buyLiquidity,
     sellLiquidity,
+    gammaFlip: gammaFlipRow?.strike || null,
     gex: totalGex,
-    dex: totalDex
+    dex: totalDex,
+    callFlow,
+    putFlow,
+    confidenceScore,
+    marketGamma,
+    marketDirection
   };
 }
 
@@ -221,8 +273,18 @@ async function syncSymbol(symbol) {
     sell_liquidity_2: pickStrike(a.sellLiquidity, 1),
     sell_liquidity_3: pickStrike(a.sellLiquidity, 2),
 
+    gamma_flip: round(a.gammaFlip, 2),
+
     gex: round(a.gex, 2),
     dex: round(a.dex, 2),
+
+    call_flow: round(a.callFlow, 2),
+    put_flow: round(a.putFlow, 2),
+
+    confidence_score: round(a.confidenceScore, 2),
+
+    market_gamma: a.marketGamma,
+    market_direction: a.marketDirection,
 
     updated_at: new Date().toISOString()
   };
@@ -237,7 +299,7 @@ async function syncSymbol(symbol) {
   }
 
   console.log(
-    `UPDATED ${symbol} | السعر ${price} | GEX ${round(a.gex, 2)} | DEX ${round(a.dex, 2)}`
+    `UPDATED ${symbol} | price ${price} | GEX ${round(a.gex, 2)} | DEX ${round(a.dex, 2)} | Flow ${round(a.callFlow, 2)}/${round(a.putFlow, 2)}`
   );
 }
 
@@ -257,5 +319,4 @@ async function run() {
 }
 
 run();
-
 setInterval(run, UPDATE_MINUTES * 60 * 1000);
