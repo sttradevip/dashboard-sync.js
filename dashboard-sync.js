@@ -8,14 +8,19 @@ const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const SYMBOLS = String(process.env.DASHBOARD_SYMBOLS || 'TSLA,NVDA,AMZN,SPY,QQQ')
+const SYMBOLS = String(process.env.DASHBOARD_SYMBOLS || 'TSLA,NVDA,AMZN,SPY,QQQ,META,AAPL')
   .split(',')
-  .map(s => s.trim().toUpperCase())
+  .map(x => x.trim().toUpperCase())
   .filter(Boolean);
 
 const UPDATE_MINUTES = Number(process.env.DASHBOARD_UPDATE_MINUTES || 10);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+function num(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 function round(v, d = 2) {
   const n = Number(v);
@@ -23,66 +28,201 @@ function round(v, d = 2) {
   return Number(n.toFixed(d));
 }
 
-async function getFinnhubPrice(symbol) {
-  const url = `https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_API_KEY}`;
-  const { data } = await axios.get(url, { timeout: 15000 });
-  return round(data?.c, 2);
+function distancePct(price, strike) {
+  if (!price || !strike) return 999;
+  return Math.abs((Number(strike) - Number(price)) / Number(price)) * 100;
 }
 
-function buildDemoLevels(price) {
-  const step = price >= 300 ? 2.5 : price >= 100 ? 1 : 0.5;
+async function getPrice(symbol) {
+  const url = 'https://finnhub.io/api/v1/quote';
+
+  const { data } = await axios.get(url, {
+    params: {
+      symbol,
+      token: FINNHUB_API_KEY
+    },
+    timeout: 15000
+  });
+
+  const price = num(data?.c, 0);
+  return price > 0 ? round(price, 2) : null;
+}
+
+async function getOptionsSnapshot(symbol) {
+  let url = `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${MASSIVE_API_KEY}`;
+  let results = [];
+  let page = 0;
+
+  while (url && page < 4) {
+    const { data } = await axios.get(url, { timeout: 25000 });
+
+    results = results.concat(data.results || []);
+
+    if (data.next_url) {
+      url = data.next_url.includes('apiKey=')
+        ? data.next_url
+        : `${data.next_url}&apiKey=${MASSIVE_API_KEY}`;
+    } else {
+      url = null;
+    }
+
+    page++;
+  }
+
+  return results;
+}
+
+function getType(item) {
+  return String(item?.details?.contract_type || '').toLowerCase();
+}
+
+function getStrike(item) {
+  return num(item?.details?.strike_price, null);
+}
+
+function getOI(item) {
+  return num(item?.open_interest, 0);
+}
+
+function getVolume(item) {
+  return num(item?.day?.volume ?? item?.volume, 0);
+}
+
+function getGamma(item) {
+  return num(item?.greeks?.gamma, 0);
+}
+
+function getDelta(item) {
+  return num(item?.greeks?.delta, 0);
+}
+
+function analyzeOptions(chain, price) {
+  const byStrike = {};
+
+  let totalGex = 0;
+  let totalDex = 0;
+
+  for (const item of chain) {
+    const type = getType(item);
+    const strike = getStrike(item);
+    const oi = getOI(item);
+    const volume = getVolume(item);
+    const gamma = getGamma(item);
+    const delta = getDelta(item);
+
+    if (!strike || !['call', 'put'].includes(type)) continue;
+
+    if (!byStrike[strike]) {
+      byStrike[strike] = {
+        strike,
+        callGex: 0,
+        putGex: 0,
+        netGex: 0,
+        callLiquidity: 0,
+        putLiquidity: 0
+      };
+    }
+
+    const rawGex = gamma * oi * 100;
+    const signedGex = type === 'put' ? -rawGex : rawGex;
+
+    byStrike[strike].netGex += signedGex;
+    totalGex += signedGex;
+
+    totalDex += delta * oi * 100;
+
+    const liquidityScore = volume + oi;
+
+    if (type === 'call') {
+      byStrike[strike].callGex += rawGex;
+      byStrike[strike].callLiquidity += liquidityScore;
+    }
+
+    if (type === 'put') {
+      byStrike[strike].putGex += rawGex;
+      byStrike[strike].putLiquidity += liquidityScore;
+    }
+  }
+
+  const rows = Object.values(byStrike)
+    .filter(r => distancePct(price, r.strike) <= 15)
+    .sort((a, b) => a.strike - b.strike);
+
+  const minPower = Math.max(...rows.map(r => Math.abs(r.netGex)), 1) * 0.03;
+
+  const gammaResistances = rows
+    .filter(r => r.strike >= price && Math.abs(r.netGex) >= minPower)
+    .sort((a, b) => a.strike - b.strike)
+    .slice(0, 3);
+
+  const gammaSupports = rows
+    .filter(r => r.strike <= price && Math.abs(r.netGex) >= minPower)
+    .sort((a, b) => b.strike - a.strike)
+    .slice(0, 3);
+
+  const buyLiquidity = rows
+    .filter(r => r.strike >= price && r.callLiquidity > 0)
+    .sort((a, b) => b.callLiquidity - a.callLiquidity)
+    .slice(0, 3);
+
+  const sellLiquidity = rows
+    .filter(r => r.strike <= price && r.putLiquidity > 0)
+    .sort((a, b) => b.putLiquidity - a.putLiquidity)
+    .slice(0, 3);
 
   return {
-    gamma_resistance_1: round(price + step),
-    gamma_resistance_2: round(price + step * 2),
-    gamma_resistance_3: round(price + step * 3),
-
-    gamma_support_1: round(price - step),
-    gamma_support_2: round(price - step * 2),
-    gamma_support_3: round(price - step * 3),
-
-    buy_liquidity_1: round(price + step),
-    buy_liquidity_2: round(price + step * 2),
-    buy_liquidity_3: round(price + step * 3),
-
-    sell_liquidity_1: round(price - step),
-    sell_liquidity_2: round(price - step * 2),
-    sell_liquidity_3: round(price - step * 3)
+    gammaSupports,
+    gammaResistances,
+    buyLiquidity,
+    sellLiquidity,
+    gex: totalGex,
+    dex: totalDex
   };
 }
 
+function pickStrike(arr, i) {
+  return arr[i]?.strike ? round(arr[i].strike, 2) : null;
+}
+
 async function syncSymbol(symbol) {
-  const price = await getFinnhubPrice(symbol);
+  const price = await getPrice(symbol);
+
   if (!price) {
     console.log(`NO PRICE: ${symbol}`);
     return;
   }
 
-  const levels = buildDemoLevels(price);
+  const chain = await getOptionsSnapshot(symbol);
+
+  if (!chain.length) {
+    console.log(`NO OPTIONS DATA: ${symbol}`);
+    return;
+  }
+
+  const a = analyzeOptions(chain, price);
 
   const row = {
     symbol,
     price,
 
-    ...levels,
+    gamma_support_1: pickStrike(a.gammaSupports, 0),
+    gamma_support_2: pickStrike(a.gammaSupports, 1),
+    gamma_support_3: pickStrike(a.gammaSupports, 2),
 
-    gamma_flip: round(price * 0.95),
-    gex: null,
-    dex: null,
+    gamma_resistance_1: pickStrike(a.gammaResistances, 0),
+    gamma_resistance_2: pickStrike(a.gammaResistances, 1),
+    gamma_resistance_3: pickStrike(a.gammaResistances, 2),
 
-    call_flow: null,
-    put_flow: null,
+    buy_liquidity_1: pickStrike(a.buyLiquidity, 0),
+    buy_liquidity_2: pickStrike(a.buyLiquidity, 1),
+    buy_liquidity_3: pickStrike(a.buyLiquidity, 2),
 
-    confidence_score: null,
+    sell_liquidity_1: pickStrike(a.sellLiquidity, 0),
+    sell_liquidity_2: pickStrike(a.sellLiquidity, 1),
+    sell_liquidity_3: pickStrike(a.sellLiquidity, 2),
 
-    market_gamma: 'غير متاح',
-    market_direction: 'غير متاح',
-    recommendation: 'انتظار',
-
-    target_1: levels.gamma_resistance_1,
-    target_2: levels.gamma_resistance_2,
-    target_3: levels.gamma_resistance_3,
-    stop_loss: levels.gamma_support_2,
+    gex: round(a.gex, 2),
+    dex: round(a.dex, 2),
 
     updated_at: new Date().toISOString()
   };
@@ -96,7 +236,9 @@ async function syncSymbol(symbol) {
     return;
   }
 
-  console.log(`UPDATED ${symbol}: ${price}`);
+  console.log(
+    `UPDATED ${symbol} | السعر ${price} | GEX ${round(a.gex, 2)} | DEX ${round(a.dex, 2)}`
+  );
 }
 
 async function run() {
@@ -107,7 +249,7 @@ async function run() {
     try {
       await syncSymbol(symbol);
     } catch (err) {
-      console.error(`ERROR ${symbol}:`, err.message);
+      console.error(`ERROR ${symbol}:`, err.response?.data || err.message);
     }
   }
 
@@ -115,4 +257,5 @@ async function run() {
 }
 
 run();
+
 setInterval(run, UPDATE_MINUTES * 60 * 1000);
