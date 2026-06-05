@@ -1,13 +1,13 @@
 {
-  "name": "st-signals-bot",
+  "name": "dashboard-sync",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "dashboard-sync.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node dashboard-sync.js"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.66.0",
-    "sharp": "^0.33.5",
-    "@supabase/supabase-js": "^2.45.4"
+    "@supabase/supabase-js": "^2.45.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.5"
   }
 }
